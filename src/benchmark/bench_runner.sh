@@ -18,7 +18,7 @@ err()  { echo -e "\033[1;31m[-]\033[0m $*"; }
 
 check_prereqs() {
     local missing=0
-    for cmd in make clang bpftool; do
+    for cmd in cmake clang; do
         if ! command -v "$cmd" &>/dev/null; then
             err "Missing: $cmd"
             missing=1
@@ -31,9 +31,9 @@ check_prereqs() {
 }
 
 build_project() {
-    info "Building MemScope project..."
-    make -C "$PROJECT_DIR" clean 2>/dev/null || true
-    make -C "$PROJECT_DIR" -j"$(nproc)"
+    info "Building MemScope project with CMake..."
+    cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
+    cmake --build "$BUILD_DIR" -j"$(nproc)"
     ok "Build complete"
 }
 
@@ -127,8 +127,8 @@ generate_report() {
 }
 
 main() {
-    info "MemScope Benchmark Runner"
-    info "========================="
+    info "MemScope Benchmark Runner (CMake)"
+    info "=================================="
 
     check_prereqs
 

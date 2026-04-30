@@ -30,6 +30,18 @@ static void print_usage(const char *prog)
         prog);
 }
 
+static void write_csv_batch(FILE *fp, struct alloc_table *table)
+{
+    fprintf(fp, "address,size,pid,tid,live,timestamp_alloc,timestamp_free\n");
+    for (size_t i = 0; i < table->count; i++) {
+        struct alloc_record *r = &table->records[i];
+        fprintf(fp, "0x%lx,%lu,%u,%u,%s,%lu,%lu\n",
+                r->addr, r->size, r->pid, r->tid,
+                r->live ? "1" : "0",
+                r->timestamp_alloc, r->timestamp_free);
+    }
+}
+
 int main(int argc, char **argv)
 {
     uint32_t target_pid = 0;
@@ -98,7 +110,7 @@ int main(int argc, char **argv)
 
     time_t start = time(NULL);
     while (g_running) {
-        collector_poll(ctx, 100);
+        int cnt = collector_poll(ctx, 10);
 
         if (duration > 0 && (time(NULL) - start) >= duration)
             break;
@@ -107,6 +119,8 @@ int main(int argc, char **argv)
             char proc_path[64];
             snprintf(proc_path, sizeof(proc_path), "/proc/%u/status", target_pid);
             if (access(proc_path, F_OK) != 0) {
+                for (int i = 0; i < 5 && collector_poll(ctx, 10) > 0; i++)
+                    ;
                 fprintf(stderr, "Target process %u exited, stopping...\n", target_pid);
                 break;
             }
@@ -120,16 +134,10 @@ int main(int argc, char **argv)
     if (output_path) {
         FILE *fp = fopen(output_path, "w");
         if (fp) {
-            fprintf(fp, "address,size,pid,tid,live,timestamp_alloc,timestamp_free\n");
-            for (size_t i = 0; i < ctx->table.count; i++) {
-                struct alloc_record *r = &ctx->table.records[i];
-                fprintf(fp, "0x%lx,%lu,%u,%u,%s,%lu,%lu\n",
-                        r->addr, r->size, r->pid, r->tid,
-                        r->live ? "1" : "0",
-                        r->timestamp_alloc, r->timestamp_free);
-            }
+            write_csv_batch(fp, &ctx->table);
             fclose(fp);
-            printf("Allocation data written to %s\n", output_path);
+            printf("Allocation data written to %s (%zu records)\n",
+                   output_path, ctx->table.count);
         } else {
             fprintf(stderr, "failed to open output file: %s\n", output_path);
         }

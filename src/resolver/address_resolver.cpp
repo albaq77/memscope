@@ -18,7 +18,21 @@ AddressResolver::~AddressResolver()
 int AddressResolver::load_binary(const std::string &path)
 {
     binary_path_ = path;
-    return analyzer_.load_binary(path);
+    int rc = analyzer_.load_binary(path);
+    if (rc == 0)
+        build_size_index();
+    return rc;
+}
+
+void AddressResolver::build_size_index()
+{
+    size_index_.clear();
+    const auto &types = analyzer_.get_all_types();
+    for (size_t i = 0; i < types.size(); i++) {
+        if (types[i].byte_size > 0 && !types[i].fields.empty()) {
+            size_index_[types[i].byte_size].push_back(i);
+        }
+    }
 }
 
 void AddressResolver::set_alloc_table(const std::vector<AllocInfo> &allocs)
@@ -53,17 +67,17 @@ std::string AddressResolver::infer_type_from_size(uint64_t size) const
     if (size == 0)
         return "";
 
+    auto it = size_index_.find(size);
+    if (it == size_index_.end())
+        return "";
+
+    const auto &candidates = it->second;
     const auto &types = analyzer_.get_all_types();
-    std::vector<std::string> candidates;
-    for (const auto &t : types) {
-        if (t.byte_size == size && !t.fields.empty()) {
-            candidates.push_back(t.name);
-        }
-    }
+
     if (candidates.size() == 1)
-        return candidates[0];
+        return types[candidates[0]].name;
     if (candidates.size() > 1)
-        return candidates[0] + " (ambiguous: " + std::to_string(candidates.size()) + " candidates)";
+        return types[candidates[0]].name + " (ambiguous: " + std::to_string(candidates.size()) + " candidates)";
     return "";
 }
 

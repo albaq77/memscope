@@ -3,7 +3,7 @@
 
 #define MAX_STACK_DEPTH 64
 #define MAX_COMM_LEN 64
-#define MAX_EVENTS 4096
+#define MAX_EVENTS 16384
 
 #ifndef BPF_MAP_TYPE_HASH
 #define BPF_MAP_TYPE_HASH 1

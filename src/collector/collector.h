@@ -10,10 +10,14 @@ struct bpf_link;
 
 #define MAX_STACK_DEPTH 64
 #define MAX_COMM_LEN 64
-#define MAX_EVENTS 4096
+#define MAX_EVENTS 16384
 #define MAX_SYM_LEN 256
 #define MAX_STACK_FRAMES 128
 #define MAX_ATTACH_POINTS 16
+
+#define ALLOC_HASH_BITS 16
+#define ALLOC_HASH_SIZE (1 << ALLOC_HASH_BITS)
+#define ALLOC_HASH_MASK (ALLOC_HASH_SIZE - 1)
 
 enum event_type {
     EVENT_MALLOC_ENTRY  = 1,
@@ -52,12 +56,16 @@ struct alloc_record {
     uint64_t *stack_frames;
     int      stack_depth;
     char     comm[MAX_COMM_LEN];
+    int      hash_next;
 };
 
 struct alloc_table {
     struct alloc_record *records;
     size_t              count;
     size_t              capacity;
+    int                *hash_buckets;
+    int                *hash_next;
+    int                 hash_size;
 };
 
 struct collector_ctx {

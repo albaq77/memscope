@@ -6,6 +6,7 @@
 #include <vector>
 #include <optional>
 #include <memory>
+#include <unordered_map>
 #include "dwarf_analyzer.h"
 
 namespace memscope {
@@ -92,6 +93,8 @@ public:
     const DwarfAnalyzer &analyzer() const { return analyzer_; }
 
 private:
+    void build_size_index();
+
     std::optional<ResolvedAddress> resolve_global(uint64_t address) const;
     std::optional<ResolvedAddress> resolve_heap(uint64_t address, uint32_t pid) const;
     std::optional<ResolvedAddress> resolve_stack(uint64_t address,
@@ -105,6 +108,8 @@ private:
     DwarfAnalyzer analyzer_;
     std::vector<AllocInfo> allocs_;
     std::string binary_path_;
+
+    std::unordered_map<uint64_t, std::vector<size_t>> size_index_;
 };
 
 }

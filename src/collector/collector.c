@@ -9,27 +9,104 @@
 
 struct bpf_object *g_bpf_obj = NULL;
 
+static inline uint32_t alloc_hash(uint64_t addr)
+{
+    uint64_t h = addr;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return (uint32_t)(h & ALLOC_HASH_MASK);
+}
+
+static int alloc_table_init(struct alloc_table *tbl, size_t initial_cap)
+{
+    memset(tbl, 0, sizeof(*tbl));
+    tbl->capacity = initial_cap ? initial_cap : 4096;
+    tbl->records = calloc(tbl->capacity, sizeof(struct alloc_record));
+    if (!tbl->records)
+        return -ENOMEM;
+
+    tbl->hash_size = ALLOC_HASH_SIZE;
+    tbl->hash_buckets = malloc(tbl->hash_size * sizeof(int));
+    if (!tbl->hash_buckets) {
+        free(tbl->records);
+        return -ENOMEM;
+    }
+    tbl->hash_next = malloc(tbl->capacity * sizeof(int));
+    if (!tbl->hash_next) {
+        free(tbl->hash_buckets);
+        free(tbl->records);
+        return -ENOMEM;
+    }
+
+    memset(tbl->hash_buckets, -1, tbl->hash_size * sizeof(int));
+    memset(tbl->hash_next, -1, tbl->capacity * sizeof(int));
+    tbl->count = 0;
+    return 0;
+}
+
+static void alloc_table_destroy(struct alloc_table *tbl)
+{
+    free(tbl->records);
+    free(tbl->hash_buckets);
+    free(tbl->hash_next);
+    memset(tbl, 0, sizeof(*tbl));
+}
+
+static int alloc_table_grow(struct alloc_table *tbl)
+{
+    size_t new_cap = tbl->capacity * 2;
+    struct alloc_record *new_buf = realloc(tbl->records, new_cap * sizeof(*new_buf));
+    if (!new_buf)
+        return -ENOMEM;
+    tbl->records = new_buf;
+
+    int *new_next = realloc(tbl->hash_next, new_cap * sizeof(int));
+    if (!new_next)
+        return -ENOMEM;
+    tbl->hash_next = new_next;
+
+    for (size_t i = tbl->capacity; i < new_cap; i++)
+        tbl->hash_next[i] = -1;
+
+    tbl->capacity = new_cap;
+    return 0;
+}
+
+static void alloc_table_insert_hash(struct alloc_table *tbl, size_t idx)
+{
+    uint32_t bucket = alloc_hash(tbl->records[idx].addr) & (tbl->hash_size - 1);
+    tbl->hash_next[idx] = tbl->hash_buckets[bucket];
+    tbl->hash_buckets[bucket] = (int)idx;
+}
+
 static int add_alloc_record(struct alloc_table *tbl, struct alloc_record *rec)
 {
     if (tbl->count >= tbl->capacity) {
-        size_t new_cap = tbl->capacity ? tbl->capacity * 2 : 1024;
-        struct alloc_record *new_buf = realloc(tbl->records,
-                                                new_cap * sizeof(*new_buf));
-        if (!new_buf)
+        if (alloc_table_grow(tbl) != 0)
             return -ENOMEM;
-        tbl->records = new_buf;
-        tbl->capacity = new_cap;
     }
-    tbl->records[tbl->count++] = *rec;
+
+    size_t idx = tbl->count;
+    tbl->records[idx] = *rec;
+    tbl->hash_next[idx] = -1;
+    alloc_table_insert_hash(tbl, idx);
+    tbl->count++;
     return 0;
 }
 
 static struct alloc_record *find_live_alloc(struct alloc_table *tbl, uint64_t addr)
 {
-    for (size_t i = 0; i < tbl->count; i++) {
-        struct alloc_record *r = &tbl->records[i];
-        if (r->live && addr >= r->addr && addr < r->addr + r->size)
+    uint32_t bucket = alloc_hash(addr) & (tbl->hash_size - 1);
+    int idx = tbl->hash_buckets[bucket];
+
+    while (idx >= 0) {
+        struct alloc_record *r = &tbl->records[idx];
+        if (r->live && r->addr == addr)
             return r;
+        idx = tbl->hash_next[idx];
     }
     return NULL;
 }
@@ -57,6 +134,7 @@ static int handle_event(void *ctx, void *data, size_t size)
         rec.tid = evt->tid;
         rec.live = 1;
         rec.stack_id = evt->stack_id;
+        rec.hash_next = -1;
         add_alloc_record(&cctx->table, &rec);
         break;
     }
@@ -77,7 +155,7 @@ static int handle_event(void *ctx, void *data, size_t size)
         break;
 
     default:
-        fprintf(stderr, "unknown event type: %u\n", evt->type);
+        break;
     }
 
     return 0;
@@ -180,9 +258,15 @@ struct collector_ctx *collector_init(const char *bpf_obj_path,
     if (binary_path)
         strncpy(ctx->binary_path, binary_path, sizeof(ctx->binary_path) - 1);
 
+    if (alloc_table_init(&ctx->table, 4096) != 0) {
+        free(ctx);
+        return NULL;
+    }
+
     struct bpf_object *obj = bpf_object__open_file(bpf_obj_path, NULL);
     if (libbpf_get_error(obj)) {
         fprintf(stderr, "failed to open BPF object: %s\n", bpf_obj_path);
+        alloc_table_destroy(&ctx->table);
         free(ctx);
         return NULL;
     }
@@ -190,6 +274,7 @@ struct collector_ctx *collector_init(const char *bpf_obj_path,
     if (bpf_object__load(obj)) {
         fprintf(stderr, "failed to load BPF object\n");
         bpf_object__close(obj);
+        alloc_table_destroy(&ctx->table);
         free(ctx);
         return NULL;
     }
@@ -200,6 +285,7 @@ struct collector_ctx *collector_init(const char *bpf_obj_path,
     if (!events_map) {
         fprintf(stderr, "failed to find events map\n");
         bpf_object__close(obj);
+        alloc_table_destroy(&ctx->table);
         free(ctx);
         return NULL;
     }
@@ -221,6 +307,7 @@ struct collector_ctx *collector_init(const char *bpf_obj_path,
     if (!ctx->ringbuf) {
         fprintf(stderr, "failed to create ring buffer\n");
         bpf_object__close(obj);
+        alloc_table_destroy(&ctx->table);
         free(ctx);
         return NULL;
     }
@@ -247,7 +334,7 @@ void collector_destroy(struct collector_ctx *ctx)
         g_bpf_obj = NULL;
     }
 
-    free(ctx->table.records);
+    alloc_table_destroy(&ctx->table);
     free(ctx);
 }
 

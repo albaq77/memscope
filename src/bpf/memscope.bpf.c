@@ -8,7 +8,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 1 << 24);
+    __uint(max_entries, 1 << 26);
 } events SEC(".maps");
 
 struct {
@@ -34,7 +34,7 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
+    __uint(max_entries, 4096);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u64));
 } pending_mallocs SEC(".maps");
@@ -52,20 +52,11 @@ static __always_inline __s64 get_stack_id(void *ctx)
 SEC("uprobe/libc.so.6:malloc")
 int BPF_KPROBE(uprobe_malloc_entry, __u64 size)
 {
-    struct mem_event evt = {};
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 tid = (__u32)pid_tgid;
 
-    evt.type = EVENT_MALLOC_ENTRY;
-    evt.pid = pid_tgid >> 32;
-    evt.tid = tid;
-    evt.timestamp = bpf_ktime_get_ns();
-    evt.stack_id = get_stack_id(ctx);
-    evt.malloc_entry.size = size;
-
     bpf_map_update_elem(&pending_mallocs, &tid, &size, BPF_ANY);
 
-    emit_event(ctx, &evt);
     return 0;
 }
 
@@ -130,7 +121,6 @@ int BPF_KPROBE(uprobe_free, void *ptr)
     evt.pid = pid_tgid >> 32;
     evt.tid = (__u32)pid_tgid;
     evt.timestamp = bpf_ktime_get_ns();
-    evt.stack_id = get_stack_id(ctx);
     evt.free_evt.addr = addr;
 
     emit_event(ctx, &evt);
@@ -146,7 +136,6 @@ int BPF_KPROBE(uprobe_mmap_entry, void *addr, __u64 size, int prot, int flags)
     evt.pid = bpf_get_current_pid_tgid() >> 32;
     evt.tid = (__u32)bpf_get_current_pid_tgid();
     evt.timestamp = bpf_ktime_get_ns();
-    evt.stack_id = get_stack_id(ctx);
     evt.mmap_evt.addr = (__u64)addr;
     evt.mmap_evt.size = size;
     evt.mmap_evt.prot = prot;
@@ -165,7 +154,6 @@ int BPF_KPROBE(uprobe_munmap_entry, void *addr, __u64 size)
     evt.pid = bpf_get_current_pid_tgid() >> 32;
     evt.tid = (__u32)bpf_get_current_pid_tgid();
     evt.timestamp = bpf_ktime_get_ns();
-    evt.stack_id = get_stack_id(ctx);
     evt.munmap_evt.addr = (__u64)addr;
     evt.munmap_evt.size = size;
 
