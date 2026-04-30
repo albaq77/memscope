@@ -27,4 +27,4 @@ if(BPFTOOL_BIN)
     )
 endif()
 
-add_custom_target(bpf ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/memscope.bpf.o)
+add_custom_target(memscope_bpf_obj ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/memscope.bpf.o)

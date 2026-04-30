@@ -19,4 +19,4 @@ target_include_directories(memscope-collect PRIVATE
 target_compile_options(memscope-collect PRIVATE ${MEMSCOPE_OPT_FLAGS} ${MEMSCOPE_WARN_C})
 target_link_libraries(memscope-collect PRIVATE memscope_collector_lib ${LIBBPF_LIBRARIES} ${LIBELF_LIBRARIES} ${ZLIB_LIBRARIES})
 target_link_directories(memscope-collect PRIVATE ${LIBBPF_LIBRARY_DIRS} ${LIBELF_LIBRARY_DIRS} ${ZLIB_LIBRARY_DIRS})
-add_dependencies(memscope-collect bpf)
+add_dependencies(memscope-collect memscope_bpf_obj)

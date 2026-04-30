@@ -4,10 +4,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
-BPF_OBJ="$BUILD_DIR/memscope.bpf.o"
-BENCH_TARGET="$BUILD_DIR/bench_target"
-RESOLVE="$BUILD_DIR/memscope-resolve"
-COLLECT="$BUILD_DIR/memscope-collect"
+BPF_OBJ="$BUILD_DIR/src/bpf/memscope.bpf.o"
+BENCH_TARGET="$BUILD_DIR/src/benchmark/bench_target"
+RESOLVE="$BUILD_DIR/src/resolver/memscope-resolve"
+COLLECT="$BUILD_DIR/src/collector/memscope-collect"
 RESULTS_DIR="$PROJECT_DIR/results"
 
 mkdir -p "$RESULTS_DIR"
@@ -24,7 +24,7 @@ ok()   { echo -e "${GREEN}$1${RESET}"; }
 warn() { echo -e "${YELLOW}$1${RESET}"; }
 
 step "Step 1: Build with CMake"
-if [ ! -f "$BUILD_DIR/memscope-collect" ]; then
+if [ ! -f "$COLLECT" ]; then
     mkdir -p "$BUILD_DIR"
     cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
     cmake --build "$BUILD_DIR" -j"$(nproc)"

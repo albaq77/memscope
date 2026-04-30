@@ -4,9 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$PROJECT_DIR/build"
-BENCH_TARGET="$BUILD_DIR/bench_target"
-MEMSCOPE="$BUILD_DIR/memscope-collect"
-BPF_OBJ="$BUILD_DIR/memscope.bpf.o"
+BENCH_TARGET="$BUILD_DIR/src/benchmark/bench_target"
+MEMSCOPE="$BUILD_DIR/src/collector/memscope-collect"
+BPF_OBJ="$BUILD_DIR/src/bpf/memscope.bpf.o"
 RESULTS_DIR="$PROJECT_DIR/results"
 DURATION=10
 
@@ -44,7 +44,7 @@ run_benchmark() {
 
     info "Running benchmark: $bench_name"
 
-    $MEMSCOPE -p 0 -b "$BENCH_TARGET" -B "$BPF_OBJ" -d 30 -o "$output_file" &
+    sudo $MEMSCOPE -p 0 -b "$BENCH_TARGET" -B "$BPF_OBJ" -d 30 -o "$output_file" &
     local memscope_pid=$!
     sleep 2
 
@@ -54,7 +54,7 @@ run_benchmark() {
     wait "$bench_pid" 2>/dev/null || true
     sleep 1
 
-    kill "$memscope_pid" 2>/dev/null || true
+    sudo kill "$memscope_pid" 2>/dev/null || true
     wait "$memscope_pid" 2>/dev/null || true
 
     if [ -f "$output_file" ]; then

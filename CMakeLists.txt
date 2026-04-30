@@ -17,20 +17,20 @@ configure_file(
 )
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    set(MEMSCOPE_OPT_FLAGS "-O3" CACHE INTERNAL "")
+    set(MEMSCOPE_OPT_FLAGS -O3 CACHE INTERNAL "")
 else()
-    set(MEMSCOPE_OPT_FLAGS "-g -O2" CACHE INTERNAL "")
+    set(MEMSCOPE_OPT_FLAGS -g -O2 CACHE INTERNAL "")
 endif()
 
-set(MEMSCOPE_WARN_C "-Wall -Wextra -Wno-unused-parameter" CACHE INTERNAL "")
-set(MEMSCOPE_WARN_CXX "-Wall -Wextra -Wno-unused-parameter" CACHE INTERNAL "")
+set(MEMSCOPE_WARN_C -Wall -Wextra -Wno-unused-parameter CACHE INTERNAL "")
+set(MEMSCOPE_WARN_CXX -Wall -Wextra -Wno-unused-parameter CACHE INTERNAL "")
 
 set(MEMSCOPE_BPF_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/bpf CACHE INTERNAL "")
 set(MEMSCOPE_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR} CACHE INTERNAL "")
 
 find_package(PkgConfig REQUIRED)
 
-pkg_check_modules(LIBBPF REQUIRED libbpf>=0.8)
+pkg_check_modules(LIBBPF REQUIRED libbpf>=0.5)
 pkg_check_modules(LIBELF REQUIRED libelf)
 pkg_check_modules(LIBDW REQUIRED libdw)
 pkg_check_modules(ZLIB REQUIRED zlib)

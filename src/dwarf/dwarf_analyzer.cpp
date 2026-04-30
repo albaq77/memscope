@@ -12,8 +12,126 @@
 #include <sstream>
 #include <iomanip>
 #include <cstdio>
+#include <utility>
 
 namespace memscope {
+
+namespace {
+
+class ScopedFd {
+public:
+    explicit ScopedFd(int fd = -1) : fd_(fd) {}
+    ~ScopedFd() { if (fd_ >= 0) close(fd_); }
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+
+    ScopedFd(ScopedFd&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+    ScopedFd& operator=(ScopedFd&& other) noexcept {
+        if (this != &other) {
+            if (fd_ >= 0) close(fd_);
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+
+    int get() const { return fd_; }
+    int release() { int fd = fd_; fd_ = -1; return fd; }
+    bool valid() const { return fd_ >= 0; }
+
+private:
+    int fd_;
+};
+
+class ScopedMmap {
+public:
+    ScopedMmap() : ptr_(nullptr), size_(0) {}
+    ScopedMmap(void* ptr, size_t size) : ptr_(ptr), size_(size) {}
+    ~ScopedMmap() { if (ptr_ && ptr_ != MAP_FAILED) munmap(ptr_, size_); }
+
+    ScopedMmap(const ScopedMmap&) = delete;
+    ScopedMmap& operator=(const ScopedMmap&) = delete;
+
+    ScopedMmap(ScopedMmap&& other) noexcept
+        : ptr_(other.ptr_), size_(other.size_) {
+        other.ptr_ = nullptr;
+        other.size_ = 0;
+    }
+    ScopedMmap& operator=(ScopedMmap&& other) noexcept {
+        if (this != &other) {
+            if (ptr_ && ptr_ != MAP_FAILED) munmap(ptr_, size_);
+            ptr_ = other.ptr_;
+            size_ = other.size_;
+            other.ptr_ = nullptr;
+            other.size_ = 0;
+        }
+        return *this;
+    }
+
+    void* get() const { return ptr_; }
+    size_t size() const { return size_; }
+    void release() { ptr_ = nullptr; size_ = 0; }
+    bool valid() const { return ptr_ != nullptr && ptr_ != MAP_FAILED; }
+
+private:
+    void*  ptr_;
+    size_t size_;
+};
+
+class ScopedElf {
+public:
+    explicit ScopedElf(Elf* elf = nullptr) : elf_(elf) {}
+    ~ScopedElf() { if (elf_) elf_end(elf_); }
+
+    ScopedElf(const ScopedElf&) = delete;
+    ScopedElf& operator=(const ScopedElf&) = delete;
+
+    ScopedElf(ScopedElf&& other) noexcept : elf_(other.elf_) { other.elf_ = nullptr; }
+    ScopedElf& operator=(ScopedElf&& other) noexcept {
+        if (this != &other) {
+            if (elf_) elf_end(elf_);
+            elf_ = other.elf_;
+            other.elf_ = nullptr;
+        }
+        return *this;
+    }
+
+    Elf* get() const { return elf_; }
+    Elf* release() { Elf* e = elf_; elf_ = nullptr; return e; }
+    bool valid() const { return elf_ != nullptr; }
+
+private:
+    Elf* elf_;
+};
+
+class ScopedDwarf {
+public:
+    explicit ScopedDwarf(Dwarf* dwarf = nullptr) : dwarf_(dwarf) {}
+    ~ScopedDwarf() { if (dwarf_) dwarf_end(dwarf_); }
+
+    ScopedDwarf(const ScopedDwarf&) = delete;
+    ScopedDwarf& operator=(const ScopedDwarf&) = delete;
+
+    ScopedDwarf(ScopedDwarf&& other) noexcept : dwarf_(other.dwarf_) { other.dwarf_ = nullptr; }
+    ScopedDwarf& operator=(ScopedDwarf&& other) noexcept {
+        if (this != &other) {
+            if (dwarf_) dwarf_end(dwarf_);
+            dwarf_ = other.dwarf_;
+            other.dwarf_ = nullptr;
+        }
+        return *this;
+    }
+
+    Dwarf* get() const { return dwarf_; }
+    Dwarf* release() { Dwarf* d = dwarf_; dwarf_ = nullptr; return d; }
+    bool valid() const { return dwarf_ != nullptr; }
+
+private:
+    Dwarf* dwarf_;
+};
+
+}
 
 DwarfAnalyzer::DwarfAnalyzer()
     : loaded_(false)
@@ -47,41 +165,50 @@ int DwarfAnalyzer::load_binary(const std::string &path)
 
     elf_version(EV_CURRENT);
 
-    elf_fd_ = open(path.c_str(), O_RDONLY);
-    if (elf_fd_ < 0) {
+    ScopedFd fd(open(path.c_str(), O_RDONLY));
+    if (!fd.valid()) {
         fprintf(stderr, "cannot open %s: %s\n", path.c_str(), strerror(errno));
         return -1;
     }
 
     struct stat st;
-    if (fstat(elf_fd_, &st) < 0) {
+    if (fstat(fd.get(), &st) < 0) {
         fprintf(stderr, "cannot stat %s: %s\n", path.c_str(), strerror(errno));
         return -1;
     }
-    elf_size_ = st.st_size;
+    size_t file_size = st.st_size;
 
-    elf_data_ = (uint8_t *)mmap(nullptr, elf_size_, PROT_READ, MAP_PRIVATE, elf_fd_, 0);
-    if (elf_data_ == MAP_FAILED) {
+    ScopedMmap mmap_guard(
+        mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd.get(), 0),
+        file_size
+    );
+    if (!mmap_guard.valid()) {
         fprintf(stderr, "cannot mmap %s: %s\n", path.c_str(), strerror(errno));
-        elf_data_ = nullptr;
         return -1;
     }
 
-    elf_ptr_ = elf_begin(elf_fd_, ELF_C_READ_MMAP, nullptr);
-    if (!elf_ptr_) {
+    ScopedElf elf_guard(elf_begin(fd.get(), ELF_C_READ_MMAP, nullptr));
+    if (!elf_guard.valid()) {
         fprintf(stderr, "elf_begin failed: %s\n", elf_errmsg(-1));
         return -1;
     }
 
-    if (elf_kind((Elf *)elf_ptr_) != ELF_K_ELF) {
+    if (elf_kind(elf_guard.get()) != ELF_K_ELF) {
         fprintf(stderr, "%s is not an ELF file\n", path.c_str());
         return -1;
     }
 
-    dwarf_ptr_ = dwarf_begin_elf((Elf *)elf_ptr_, DWARF_C_READ, nullptr);
-    if (!dwarf_ptr_) {
+    ScopedDwarf dwarf_guard(dwarf_begin_elf(elf_guard.get(), DWARF_C_READ, nullptr));
+    if (!dwarf_guard.valid()) {
         fprintf(stderr, "no DWARF info in %s, falling back to symbol table\n", path.c_str());
     }
+
+    elf_fd_ = fd.release();
+    elf_data_ = static_cast<uint8_t*>(mmap_guard.get());
+    elf_size_ = mmap_guard.size();
+    mmap_guard.release();
+    elf_ptr_ = elf_guard.release();
+    dwarf_ptr_ = dwarf_guard.valid() ? dwarf_guard.release() : nullptr;
 
     int rc = 0;
     rc |= parse_symbol_table();
