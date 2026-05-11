@@ -37,8 +37,10 @@ int AddressResolver::load_binary(const std::string &path)
 {
     binary_path_ = path;
     int rc = analyzer_.load_binary(path);
-    if (rc == 0)
+    if (rc == 0) {
         build_size_index();
+        source_analyzer_.load_binary(path);
+    }
     return rc;
 }
 
@@ -392,6 +394,23 @@ TypeInferenceResult AddressResolver::try_array_size_match(uint64_t size) const
     return result;
 }
 
+TypeInferenceResult AddressResolver::infer_type_from_source_text(uint64_t pc) const
+{
+    TypeInferenceResult result = {};
+    result.alloc_count = 1;
+
+    TypeExtractionResult source_result = source_analyzer_.extract_type_from_source(pc);
+
+    if (!source_result.type_name.empty()) {
+        result.type_name = source_result.type_name;
+        result.method = source_result.method;
+        result.confidence = source_result.confidence;
+        result.note = source_result.note;
+    }
+
+    return result;
+}
+
 TypeInferenceResult AddressResolver::infer_type_combined_v2(
     int64_t stack_id, uint64_t size,
     const std::vector<uint64_t> &inline_pcs) const
@@ -423,6 +442,22 @@ TypeInferenceResult AddressResolver::infer_type_combined_v2(
             uint64_t file_offset = va_to_file_offset(caller_pc);
             debug_log("[DEBUG]   pcs[%zu]=0x%lx caller=0x%lx file_off=0x%lx\n",
                       i, pcs[i], caller_pc, file_offset);
+
+            TypeInferenceResult source_result = infer_type_from_source_text(file_offset);
+            if (!source_result.type_name.empty() && source_result.confidence >= 0.80f) {
+                debug_log("[DEBUG]   source_text extraction succeeded: %s (confidence=%.2f)\n",
+                          source_result.type_name.c_str(), source_result.confidence);
+                
+                const TypeInfo *ti = analyzer_.find_type_by_name(source_result.type_name);
+                if (ti && ti->byte_size > 0 && size % ti->byte_size == 0) {
+                    source_result.alloc_count = size / ti->byte_size;
+                    if (source_result.alloc_count > 1)
+                        source_result.note = "array allocation (" +
+                                      std::to_string(source_result.alloc_count) + " elements)";
+                }
+                
+                return source_result;
+            }
 
             auto pc_types = analyzer_.find_pointer_target_types_at_pc(file_offset);
             debug_log("[DEBUG]   find_pointer_target_types_at_pc(0x%lx): %zu candidates\n",
