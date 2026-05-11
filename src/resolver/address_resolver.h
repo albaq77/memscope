@@ -8,6 +8,7 @@
 #include <memory>
 #include <unordered_map>
 #include "dwarf_analyzer.h"
+#include "source_code_analyzer.h"
 
 namespace memscope {
 
@@ -119,6 +120,7 @@ private:
     std::string infer_type_combined(int64_t stack_id, uint64_t size) const;
     TypeInferenceResult infer_type_combined_v2(int64_t stack_id, uint64_t size,
                                                 const std::vector<uint64_t> &inline_pcs = {}) const;
+    TypeInferenceResult infer_type_from_source_text(uint64_t pc) const;
     TypeInferenceResult try_array_size_match(uint64_t size) const;
     std::vector<std::string> get_size_candidates(uint64_t size) const;
 
@@ -129,6 +131,7 @@ private:
     int64_t compute_aslr_offset(const std::vector<uint64_t> &runtime_pcs) const;
 
     DwarfAnalyzer analyzer_;
+    SourceCodeAnalyzer source_analyzer_;
     std::vector<AllocInfo> allocs_;
     std::string binary_path_;
 

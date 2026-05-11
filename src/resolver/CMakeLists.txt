@@ -1,5 +1,6 @@
 add_library(memscope_resolver_lib STATIC
     address_resolver.cpp
+    source_code_analyzer.cpp
 )
 target_include_directories(memscope_resolver_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
