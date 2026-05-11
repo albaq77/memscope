@@ -77,6 +77,10 @@ run_all_benchmarks() {
         "mixed_alloc:5"
         "sequential_access:6"
         "random_access:7"
+        "ambiguous_size:8"
+        "global_access:9"
+        "stack_variables:10"
+        "multi_struct:11"
     )
 
     for bench in "${benches[@]}"; do

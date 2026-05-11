@@ -24,10 +24,26 @@ ok()   { echo -e "${GREEN}$1${RESET}"; }
 warn() { echo -e "${YELLOW}$1${RESET}"; }
 
 step "Step 1: Build with CMake"
-if [ ! -f "$COLLECT" ]; then
-    mkdir -p "$BUILD_DIR"
-    cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
-    cmake --build "$BUILD_DIR" -j"$(nproc)"
+mkdir -p "$BUILD_DIR"
+cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Debug
+cmake --build "$BUILD_DIR" -j"$(nproc)"
+
+if [ ! -f "$BENCH_TARGET" ]; then
+    echo -e "${RED}Error: bench_target not found at $BENCH_TARGET${RESET}"
+    echo "Looking for bench_target in build directory..."
+    FOUND=$(find "$BUILD_DIR" -name "bench_target" -type f 2>/dev/null | head -1)
+    if [ -n "$FOUND" ]; then
+        BENCH_TARGET="$FOUND"
+        ok "Found bench_target at: $BENCH_TARGET"
+    else
+        echo -e "${RED}bench_target not found anywhere in build directory!${RESET}"
+        exit 1
+    fi
+fi
+
+if [ ! -f "$RESOLVE" ]; then
+    echo -e "${RED}Error: memscope-resolve not found at $RESOLVE${RESET}"
+    exit 1
 fi
 
 step "Step 2: View struct types in bench_target"
@@ -38,6 +54,8 @@ $RESOLVE layout -b "$BENCH_TARGET" -t Point 2>/dev/null || true
 $RESOLVE layout -b "$BENCH_TARGET" -t Node 2>/dev/null || true
 $RESOLVE layout -b "$BENCH_TARGET" -t Buffer 2>/dev/null || true
 $RESOLVE layout -b "$BENCH_TARGET" -t Packet 2>/dev/null || true
+$RESOLVE layout -b "$BENCH_TARGET" -t Vec3 2>/dev/null || true
+$RESOLVE layout -b "$BENCH_TARGET" -t Color 2>/dev/null || true
 
 step "Step 4: Run eBPF collector to capture allocations"
 warn "Requires root for eBPF..."
@@ -45,9 +63,9 @@ sudo $COLLECT -p 0 -b "$BENCH_TARGET" -B "$BPF_OBJ" -d 60 -o "$RESULTS_DIR/demo_
 COLLECT_PID=$!
 sleep 2
 
-$BENCH_TARGET 1
+$BENCH_TARGET 8 &
 BENCH_PID=$!
-echo "Benchmark PID: $BENCH_PID"
+echo "Benchmark PID: $BENCH_PID (running ambiguous size test)"
 
 wait $BENCH_PID 2>/dev/null || true
 echo "Benchmark done."

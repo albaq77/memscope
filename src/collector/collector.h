@@ -34,9 +34,11 @@ struct mem_event {
     uint32_t tid;
     uint64_t timestamp;
     int64_t  stack_id;
+    uint32_t stack_depth;
+    uint32_t _reserved;
     union {
         struct { uint64_t size; } malloc_entry;
-        struct { uint64_t addr; uint64_t size; } malloc_ret;
+        struct { uint64_t addr; uint64_t size; uint64_t pcs[MAX_STACK_DEPTH]; } malloc_ret;
         struct { uint64_t addr; } free_evt;
         struct { uint64_t addr; uint64_t size; int32_t prot; int32_t flags; } mmap_evt;
         struct { uint64_t addr; uint64_t size; } munmap_evt;
@@ -53,7 +55,7 @@ struct alloc_record {
     uint32_t pid;
     uint32_t tid;
     int      live;
-    uint64_t *stack_frames;
+    uint64_t stack_pcs[MAX_STACK_DEPTH];
     int      stack_depth;
     char     comm[MAX_COMM_LEN];
     int      hash_next;

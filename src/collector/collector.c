@@ -126,6 +126,16 @@ static int handle_event(void *ctx, void *data, size_t size)
         break;
 
     case EVENT_MALLOC_RETURN: {
+        static int log_count = 0;
+        if (log_count < 20) {
+            fprintf(stderr, "[DEBUG] MALLOC_RETURN: addr=0x%lx size=%lu stack_id=%ld depth=%u\n",
+                    evt->malloc_ret.addr, evt->malloc_ret.size, evt->stack_id, evt->stack_depth);
+            if (evt->stack_depth > 0) {
+                fprintf(stderr, "[DEBUG]   pcs[0]=0x%lx pcs[1]=0x%lx pcs[2]=0x%lx\n",
+                        evt->malloc_ret.pcs[0], evt->malloc_ret.pcs[1], evt->malloc_ret.pcs[2]);
+            }
+            log_count++;
+        }
         struct alloc_record rec = {};
         rec.addr = evt->malloc_ret.addr;
         rec.size = evt->malloc_ret.size;
@@ -134,6 +144,11 @@ static int handle_event(void *ctx, void *data, size_t size)
         rec.tid = evt->tid;
         rec.live = 1;
         rec.stack_id = evt->stack_id;
+        rec.stack_depth = evt->stack_depth;
+        if (evt->stack_depth > 0 && evt->stack_depth <= MAX_STACK_DEPTH) {
+            memcpy(rec.stack_pcs, evt->malloc_ret.pcs,
+                   evt->stack_depth * sizeof(uint64_t));
+        }
         rec.hash_next = -1;
         add_alloc_record(&cctx->table, &rec);
         break;

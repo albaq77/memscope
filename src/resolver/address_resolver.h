@@ -61,6 +61,16 @@ struct AllocInfo {
     uint32_t pid;
     uint32_t tid;
     int      live;
+    int      stack_depth;
+    std::vector<uint64_t> stack_pcs;
+};
+
+struct TypeInferenceResult {
+    std::string type_name;
+    uint64_t    alloc_count;
+    std::string method;
+    float       confidence;
+    std::string note;
 };
 
 class AddressResolver {
@@ -70,6 +80,8 @@ public:
 
     int load_binary(const std::string &path);
     void set_alloc_table(const std::vector<AllocInfo> &allocs);
+    void set_stack_map_fd(int fd);
+    void set_debug_log(const std::string &path);
 
     std::optional<ResolvedAddress> resolve(uint64_t address,
                                             uint32_t pid = 0,
@@ -104,12 +116,25 @@ private:
 
     std::string infer_type_from_callsite(int64_t stack_id) const;
     std::string infer_type_from_size(uint64_t size) const;
+    std::string infer_type_combined(int64_t stack_id, uint64_t size) const;
+    TypeInferenceResult infer_type_combined_v2(int64_t stack_id, uint64_t size,
+                                                const std::vector<uint64_t> &inline_pcs = {}) const;
+    TypeInferenceResult try_array_size_match(uint64_t size) const;
+    std::vector<std::string> get_size_candidates(uint64_t size) const;
+
+    std::vector<std::string> resolve_stack_function_names(int64_t stack_id) const;
+    std::vector<std::string> resolve_function_names_from_pcs(const std::vector<uint64_t> &pcs) const;
+    std::vector<uint64_t> resolve_stack_pcs(int64_t stack_id) const;
+    uint64_t va_to_file_offset(uint64_t va) const;
+    int64_t compute_aslr_offset(const std::vector<uint64_t> &runtime_pcs) const;
 
     DwarfAnalyzer analyzer_;
     std::vector<AllocInfo> allocs_;
     std::string binary_path_;
 
     std::unordered_map<uint64_t, std::vector<size_t>> size_index_;
+    int stack_map_fd_;
+    int64_t aslr_offset_;
 };
 
 }
