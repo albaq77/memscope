@@ -174,8 +174,10 @@ std::vector<std::string> SourceCodeAnalyzer::extract_malloc_types(const std::str
         std::regex(R"(struct\s+([^*\s]+)\s*\*\s+(\w+)\s*=\s*malloc\s*\()"),
         std::regex(R"(malloc\s*\(\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
         std::regex(R"(malloc\s*\(\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
-        std::regex(R"(malloc\s*\(\s*\w+\s*\*\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
-        std::regex(R"(malloc\s*\(\s*\w+\s*\*\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
+        std::regex(R"(malloc\s*\([^)]*\*\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
+        std::regex(R"(malloc\s*\([^)]*\*\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
+        std::regex(R"(malloc\s*\(\s*\([^)]+\)\s*\*\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
+        std::regex(R"(malloc\s*\(\s*\([^)]+\)\s*\*\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
     };
 
     for (const auto &pattern : patterns) {
@@ -240,6 +242,8 @@ std::vector<std::string> SourceCodeAnalyzer::extract_realloc_types(const std::st
         std::regex(R"(=\s*\(\s*struct\s+([^*\s]+)\s*\*\s*\)\s*realloc\s*\()"),
         std::regex(R"(([^*\s]+)\s*\*\s+(\w+)\s*=\s*realloc\s*\()"),
         std::regex(R"(struct\s+([^*\s]+)\s*\*\s+(\w+)\s*=\s*realloc\s*\()"),
+        std::regex(R"(realloc\s*\([^,]+,\s*[^)]*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
+        std::regex(R"(realloc\s*\([^,]+,\s*[^)]*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
     };
 
     for (const auto &pattern : patterns) {

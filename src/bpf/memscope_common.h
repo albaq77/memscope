@@ -1,12 +1,16 @@
 #ifndef __MEMSCOPE_BPF_H
 #define __MEMSCOPE_BPF_H
 
-#define MAX_STACK_DEPTH 64
+#define MAX_STACK_DEPTH 32
 #define MAX_COMM_LEN 64
 #define MAX_EVENTS 16384
 
 #ifndef BPF_MAP_TYPE_HASH
 #define BPF_MAP_TYPE_HASH 1
+#endif
+
+#ifndef BPF_MAP_TYPE_ARRAY
+#define BPF_MAP_TYPE_ARRAY 2
 #endif
 
 #ifndef BPF_MAP_TYPE_STACK_TRACE
