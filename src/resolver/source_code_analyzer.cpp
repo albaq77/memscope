@@ -109,11 +109,13 @@ TypeExtractionResult SourceCodeAnalyzer::extract_type_from_source(uint64_t pc) c
         return result;
     }
 
-    result.type_name = types[0];
-    result.method = "source_text_ambiguous";
-    result.confidence = 0.50f;
-    result.note = "Multiple types found: " + std::to_string(types.size()) + " candidates";
-    return result;
+    if (types.size() > 1) {
+        result.type_name = types[0];
+        result.method = "source_text";
+        result.confidence = 0.75f;
+        result.note = "Extracted from source (multiple candidates): " + *source_line;
+        return result;
+    }
 }
 
 std::string SourceCodeAnalyzer::execute_addr2line(uint64_t pc) const

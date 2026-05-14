@@ -5,6 +5,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>
+#include <map>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
@@ -40,6 +42,7 @@ int AddressResolver::load_binary(const std::string &path)
     if (rc == 0) {
         build_size_index();
         source_analyzer_.load_binary(path);
+        detect_binary_ranges();
     }
     return rc;
 }
@@ -84,12 +87,24 @@ const AllocInfo *AddressResolver::find_alloc(uint64_t addr) const
 {
     auto cmp = [](uint64_t v, const AllocInfo &a) { return v < a.addr; };
     auto it = std::upper_bound(allocs_.begin(), allocs_.end(), addr, cmp);
-    if (it == allocs_.begin())
-        return nullptr;
-
-    --it;
-    if (addr >= it->addr && addr < it->addr + it->size && it->live)
-        return &(*it);
+    
+    const AllocInfo *best_match = nullptr;
+    
+    while (it != allocs_.begin()) {
+        --it;
+        if (addr >= it->addr && addr < it->addr + it->size) {
+            if (it->live) {
+                return &(*it);
+            }
+            if (!best_match) {
+                best_match = &(*it);
+            }
+        }
+        if (addr >= it->addr + it->size) {
+            break;
+        }
+    }
+    
     return nullptr;
 }
 
@@ -309,32 +324,54 @@ int64_t AddressResolver::compute_aslr_offset(const std::vector<uint64_t> &runtim
     if (aslr_offset_ != 0)
         return aslr_offset_;
 
-    const auto &syms = analyzer_.get_all_symbols();
     const auto &subprogs = analyzer_.get_subprograms();
 
+    debug_log("[DEBUG] compute_aslr_offset: trying %zu runtime PCs, %zu subprograms\n", 
+              runtime_pcs.size(), subprogs.size());
+
+    std::map<int64_t, int> offset_counts;
+    
     for (uint64_t runtime_pc : runtime_pcs) {
+        if (runtime_pc == 0)
+            continue;
+        
+        if (runtime_pc >= 0x7f0000000000ULL)
+            continue;
+        
         for (const auto &sp : subprogs) {
-            if (sp.low_pc == 0 || sp.high_pc == 0)
+            if (sp.low_pc == 0 || sp.name.empty())
                 continue;
 
             uint64_t compile_start = sp.low_pc;
-            uint64_t compile_size = sp.high_pc_is_offset ? sp.high_pc : (sp.high_pc - sp.low_pc);
+            uint64_t compile_end = sp.high_pc_is_offset ? sp.low_pc + sp.high_pc : sp.high_pc;
 
-            for (const auto &sym : syms) {
-                if (sym.sym_type != SymbolInfo::SYM_FUNC || sym.address == 0)
-                    continue;
+            if (compile_end <= compile_start)
+                continue;
 
-                if (sym.name == sp.name || sym.name == sp.linkage_name) {
-                    int64_t offset = (int64_t)sym.address - (int64_t)compile_start;
-                    if (offset != 0) {
-                        debug_log("[DEBUG] ASLR offset computed: sym_addr=0x%lx compile_low_pc=0x%lx offset=%ld (from %s)\n",
-                                  sym.address, compile_start, offset, sp.name.c_str());
-                        const_cast<int64_t&>(aslr_offset_) = offset;
-                        return offset;
-                    }
-                }
+            int64_t potential_offset = (int64_t)runtime_pc - (int64_t)compile_start;
+            
+            if (potential_offset < 0x1000000LL || potential_offset > 0x1000000000000LL)
+                continue;
+            
+            int64_t rounded_offset = (potential_offset / 0x1000) * 0x1000;
+            offset_counts[rounded_offset]++;
+        }
+    }
+    
+    if (!offset_counts.empty()) {
+        int64_t best_offset = 0;
+        int best_count = 0;
+        for (const auto &p : offset_counts) {
+            if (p.second > best_count) {
+                best_count = p.second;
+                best_offset = p.first;
             }
         }
+        
+        debug_log("[DEBUG] ASLR offset computed: %ld (count=%d)\n",
+                  best_offset, best_count);
+        const_cast<int64_t&>(aslr_offset_) = best_offset;
+        return best_offset;
     }
 
     debug_log("[DEBUG] ASLR offset: could not compute, assuming 0\n");
@@ -343,8 +380,41 @@ int64_t AddressResolver::compute_aslr_offset(const std::vector<uint64_t> &runtim
 
 uint64_t AddressResolver::va_to_file_offset(uint64_t va) const
 {
-    if (aslr_offset_ != 0)
-        return (uint64_t)((int64_t)va - aslr_offset_);
+    if (va < 0x100000) {
+        return va;
+    }
+    
+    if (va >= 0x7f0000000000ULL) {
+        return va;
+    }
+    
+    uint64_t va_page_offset = va & 0xFFF;
+    
+    debug_log("[DEBUG] va_to_file_offset: va=0x%lx page_offset=0x%lx ranges=%zu\n",
+              va, va_page_offset, binary_ranges_.size());
+    
+    for (const auto &range : binary_ranges_) {
+        debug_log("[DEBUG]   range: 0x%lx - 0x%lx\n", range.start, range.end);
+        
+        uint64_t compile_page_base = range.start & ~0xFFF;
+        uint64_t compile_page_end = (range.end + 0xFFF) & ~0xFFF;
+        
+        for (uint64_t page = compile_page_base; page <= compile_page_end; page += 0x1000) {
+            uint64_t potential_compile_addr = page | va_page_offset;
+            
+            if (potential_compile_addr >= range.start && potential_compile_addr < range.end) {
+                int64_t potential_aslr = (int64_t)va - (int64_t)potential_compile_addr;
+                debug_log("[DEBUG]     potential_compile_addr=0x%lx aslr=%ld\n",
+                          potential_compile_addr, potential_aslr);
+                if (potential_aslr >= 0x1000000LL && potential_aslr < 0x1000000000000LL) {
+                    debug_log("[DEBUG]     MATCHED!\n");
+                    return potential_compile_addr;
+                }
+            }
+        }
+    }
+    
+    debug_log("[DEBUG]   NO MATCH\n");
     return va;
 }
 
@@ -399,7 +469,14 @@ TypeInferenceResult AddressResolver::infer_type_from_source_text(uint64_t pc) co
     TypeInferenceResult result = {};
     result.alloc_count = 1;
 
+    debug_log("[DEBUG] infer_type_from_source_text: pc=0x%lx\n", pc);
+
     TypeExtractionResult source_result = source_analyzer_.extract_type_from_source(pc);
+
+    debug_log("[DEBUG]   extract_type_from_source result: type='%s' method='%s' confidence=%.2f\n",
+              source_result.type_name.c_str(),
+              source_result.method.c_str(),
+              source_result.confidence);
 
     if (!source_result.type_name.empty()) {
         result.type_name = source_result.type_name;
@@ -434,17 +511,26 @@ TypeInferenceResult AddressResolver::infer_type_combined_v2(
     }
 
     if (!pcs.empty()) {
+        const_cast<int64_t&>(aslr_offset_) = 0;
+        
         compute_aslr_offset(pcs);
         debug_log("[DEBUG]   ASLR offset: %ld\n", aslr_offset_);
 
         for (size_t i = 1; i < pcs.size(); i++) {
             uint64_t caller_pc = pcs[i] > 0 ? pcs[i] - 1 : pcs[i];
+            
+            if (!is_in_target_binary(caller_pc)) {
+                debug_log("[DEBUG]   pcs[%zu]=0x%lx skipped (not in target binary)\n",
+                          i, pcs[i]);
+                continue;
+            }
+            
             uint64_t file_offset = va_to_file_offset(caller_pc);
             debug_log("[DEBUG]   pcs[%zu]=0x%lx caller=0x%lx file_off=0x%lx\n",
                       i, pcs[i], caller_pc, file_offset);
 
             TypeInferenceResult source_result = infer_type_from_source_text(file_offset);
-            if (!source_result.type_name.empty() && source_result.confidence >= 0.80f) {
+            if (!source_result.type_name.empty() && source_result.confidence >= 0.50f) {
                 debug_log("[DEBUG]   source_text extraction succeeded: %s (confidence=%.2f)\n",
                           source_result.type_name.c_str(), source_result.confidence);
                 
@@ -942,6 +1028,64 @@ std::string AddressResolver::resolved_to_string(const ResolvedAddress &resolved)
     }
 
     return oss.str();
+}
+
+void AddressResolver::detect_binary_ranges()
+{
+    binary_ranges_.clear();
+    
+    const auto &subprogs = analyzer_.get_subprograms();
+    
+    debug_log("[DEBUG] detect_binary_ranges: found %zu subprograms\n", subprogs.size());
+    
+    uint64_t min_addr = UINT64_MAX;
+    uint64_t max_addr = 0;
+    
+    for (const auto &sp : subprogs) {
+        if (sp.low_pc == 0 || sp.high_pc == 0)
+            continue;
+        
+        uint64_t start = sp.low_pc;
+        uint64_t end = sp.high_pc_is_offset ? sp.low_pc + sp.high_pc : sp.high_pc;
+        
+        if (end <= start)
+            continue;
+        
+        if (start < min_addr)
+            min_addr = start;
+        if (end > max_addr)
+            max_addr = end;
+    }
+    
+    if (min_addr != UINT64_MAX && max_addr > min_addr) {
+        binary_ranges_.push_back({min_addr, max_addr, binary_path_});
+    }
+    
+    debug_log("[DEBUG] detect_binary_ranges: detected %zu binary ranges\n", binary_ranges_.size());
+    for (const auto &range : binary_ranges_) {
+        debug_log("[DEBUG]   range: 0x%lx - 0x%lx (%s)\n",
+                  range.start, range.end, range.path.c_str());
+    }
+}
+
+bool AddressResolver::is_in_target_binary(uint64_t addr) const
+{
+    if (addr < 0x100000) {
+        return true;
+    }
+    
+    if (addr >= 0x7f0000000000ULL) {
+        return false;
+    }
+    
+    for (const auto &range : binary_ranges_) {
+        int64_t potential_aslr = (int64_t)addr - (int64_t)range.start;
+        if (potential_aslr >= 0x1000000LL && potential_aslr < 0x1000000000000LL) {
+            return true;
+        }
+    }
+    
+    return false;
 }
 
 }

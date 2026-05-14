@@ -74,6 +74,12 @@ struct TypeInferenceResult {
     std::string note;
 };
 
+struct BinaryRange {
+    uint64_t start;
+    uint64_t end;
+    std::string path;
+};
+
 class AddressResolver {
 public:
     explicit AddressResolver();
@@ -107,6 +113,8 @@ public:
 
 private:
     void build_size_index();
+    void detect_binary_ranges();
+    bool is_in_target_binary(uint64_t addr) const;
 
     std::optional<ResolvedAddress> resolve_global(uint64_t address) const;
     std::optional<ResolvedAddress> resolve_heap(uint64_t address, uint32_t pid) const;
@@ -134,6 +142,7 @@ private:
     SourceCodeAnalyzer source_analyzer_;
     std::vector<AllocInfo> allocs_;
     std::string binary_path_;
+    std::vector<BinaryRange> binary_ranges_;
 
     std::unordered_map<uint64_t, std::vector<size_t>> size_index_;
     int stack_map_fd_;
