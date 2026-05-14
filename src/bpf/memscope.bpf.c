@@ -57,14 +57,14 @@ struct {
 } pending_stacks SEC(".maps");
 
 struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(struct stack_pcs_value));
 } tmp_stack_buf SEC(".maps");
 
 struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(max_entries, 1);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(struct mem_event));

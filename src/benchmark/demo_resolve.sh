@@ -57,15 +57,18 @@ $RESOLVE layout -b "$BENCH_TARGET" -t Packet 2>/dev/null || true
 $RESOLVE layout -b "$BENCH_TARGET" -t Vec3 2>/dev/null || true
 $RESOLVE layout -b "$BENCH_TARGET" -t Color 2>/dev/null || true
 
-step "Step 4: Run eBPF collector to capture allocations"
+step "Step 4: Run eBPF collector to capture allocations (5 seconds)"
 warn "Requires root for eBPF..."
-sudo $COLLECT -p 0 -b "$BENCH_TARGET" -B "$BPF_OBJ" -d 60 -o "$RESULTS_DIR/demo_allocs.csv" &
+
+sudo $COLLECT -p 0 -b "$BENCH_TARGET" -B "$BPF_OBJ" -d 5 -o "$RESULTS_DIR/demo_allocs.csv" &
 COLLECT_PID=$!
+echo "Collector PID: $COLLECT_PID"
+
 sleep 2
 
-$BENCH_TARGET 8 &
+$BENCH_TARGET 1 10000 &
 BENCH_PID=$!
-echo "Benchmark PID: $BENCH_PID (running ambiguous size test)"
+echo "Benchmark PID: $BENCH_PID (running test 1: basic allocations, 10000 iterations)"
 
 wait $BENCH_PID 2>/dev/null || true
 echo "Benchmark done."
@@ -77,20 +80,32 @@ echo "Collector finished."
 
 step "Step 5: View captured allocations"
 if [ -f "$RESULTS_DIR/demo_allocs.csv" ]; then
-    echo "CSV (first 10 lines):"
-    head -11 "$RESULTS_DIR/demo_allocs.csv"
-    echo ""
-
     TOTAL=$(tail -n +2 "$RESULTS_DIR/demo_allocs.csv" | wc -l)
-    LIVE=$(tail -n +2 "$RESULTS_DIR/demo_allocs.csv" | awk -F, '$5=="1"' | wc -l)
-    ok "Total $TOTAL allocation records, $LIVE still live"
+    ok "Total $TOTAL allocation records (all processes)"
+    
+    if [ -n "$BENCH_PID" ]; then
+        head -1 "$RESULTS_DIR/demo_allocs.csv" > "$RESULTS_DIR/demo_filtered.csv"
+        awk -F, -v pid="$BENCH_PID" 'NR>1 && $3==pid' "$RESULTS_DIR/demo_allocs.csv" >> "$RESULTS_DIR/demo_filtered.csv"
+        FILTERED=$(tail -n +2 "$RESULTS_DIR/demo_filtered.csv" | wc -l)
+        ok "Filtered to $FILTERED records for PID $BENCH_PID"
+        echo ""
+        
+        echo "CSV (first 10 lines):"
+        head -11 "$RESULTS_DIR/demo_filtered.csv"
+        echo ""
+    else
+        echo "CSV (first 10 lines):"
+        head -11 "$RESULTS_DIR/demo_allocs.csv"
+        echo ""
+        cp "$RESULTS_DIR/demo_allocs.csv" "$RESULTS_DIR/demo_filtered.csv"
+    fi
 else
     echo -e "${RED}No CSV file generated${RESET}"
     exit 1
 fi
 
 step "Step 6: Batch resolve all addresses to struct fields"
-$RESOLVE batch -b "$BENCH_TARGET" -f "$RESULTS_DIR/demo_allocs.csv" -o "$RESULTS_DIR/demo_resolved.csv"
+$RESOLVE batch -b "$BENCH_TARGET" -f "$RESULTS_DIR/demo_filtered.csv" -o "$RESULTS_DIR/demo_resolved.csv"
 echo ""
 
 step "Step 7: View resolved results"
@@ -101,6 +116,30 @@ if [ -f "$RESULTS_DIR/demo_resolved.csv" ]; then
 
     WITH_FIELD=$(tail -n +2 "$RESULTS_DIR/demo_resolved.csv" | awk -F, '$5!=""' | wc -l)
     ok "$WITH_FIELD records matched to specific fields"
+    echo ""
+    
+    echo "Inference methods:"
+    awk -F, 'NR>1 {print $9}' "$RESULTS_DIR/demo_resolved.csv" | sort | uniq -c | sort -rn | head -10
+    echo ""
+    
+    SOURCE_TEXT=$(grep -c "source_text" "$RESULTS_DIR/demo_resolved.csv" 2>/dev/null || echo "0")
+    SIZE_MATCH=$(grep -c "size_match" "$RESULTS_DIR/demo_resolved.csv" 2>/dev/null || echo "0")
+    AMBIGUOUS=$(grep -c "(ambiguous)" "$RESULTS_DIR/demo_resolved.csv" 2>/dev/null || echo "0")
+    
+    echo "Summary:"
+    echo "  source_text: $SOURCE_TEXT"
+    echo "  size_match:  $SIZE_MATCH"
+    echo "  ambiguous:   $AMBIGUOUS"
+    echo ""
+    
+    if [ "$SOURCE_TEXT" -gt 0 ]; then
+        ok "addr2line type inference is working!"
+        echo ""
+        echo "Examples:"
+        grep "source_text" "$RESULTS_DIR/demo_resolved.csv" | head -5 | cut -d',' -f1-9
+    else
+        warn "No source_text method detected"
+    fi
 fi
 
 step "Done!"
