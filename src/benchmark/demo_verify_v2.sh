@@ -12,6 +12,14 @@ RESULTS_DIR="$PROJECT_DIR/results_v2"
 
 mkdir -p "$RESULTS_DIR"
 
+LOCAL_TMPDIR="/tmp/memscope_v2"
+mkdir -p "$LOCAL_TMPDIR"
+
+LOCAL_BPF_OBJ="$LOCAL_TMPDIR/memscope.bpf.o"
+LOCAL_BENCH_V2="$LOCAL_TMPDIR/bench_target_v2"
+LOCAL_RESOLVE="$LOCAL_TMPDIR/memscope-resolve"
+LOCAL_COLLECT="$LOCAL_TMPDIR/memscope-collect"
+
 BOLD='\033[1m'
 GREEN='\033[1;32m'
 CYAN='\033[1;36m'
@@ -98,6 +106,13 @@ if [ ! -f "$RESOLVE" ]; then
     exit 1
 fi
 
+step "Step 1b: Copy binaries to local filesystem (avoid FUSE issues)"
+cp -f "$BPF_OBJ" "$LOCAL_BPF_OBJ" 2>/dev/null && BPF_OBJ="$LOCAL_BPF_OBJ" && ok "BPF obj copied to /tmp" || warn "BPF obj copy skipped"
+cp -f "$BENCH_V2" "$LOCAL_BENCH_V2" 2>/dev/null && BENCH_V2="$LOCAL_BENCH_V2" && ok "bench_target_v2 copied to /tmp" || warn "bench copy skipped"
+cp -f "$RESOLVE" "$LOCAL_RESOLVE" 2>/dev/null && RESOLVE="$LOCAL_RESOLVE" && ok "resolve copied to /tmp" || warn "resolve copy skipped"
+cp -f "$COLLECT" "$LOCAL_COLLECT" 2>/dev/null && COLLECT="$LOCAL_COLLECT" && ok "collect copied to /tmp" || warn "collect copy skipped"
+chmod +x "$LOCAL_BENCH_V2" "$LOCAL_RESOLVE" "$LOCAL_COLLECT" 2>/dev/null || true
+
 step "Step 2: Verify DWARF type information"
 TYPE_OUTPUT=$($RESOLVE types -b "$BENCH_V2" 2>/dev/null)
 
@@ -152,14 +167,31 @@ for sym in $EXPECTED_GLOBALS; do
     fi
 done
 
-step "Step 5: Collect allocations with eBPF (8 seconds)"
+step "Step 5: Collect allocations with eBPF (10 seconds)"
 warn "Requires root for eBPF..."
 
-sudo $COLLECT -p 0 -b "$BENCH_V2" -B "$BPF_OBJ" -d 8 -o "$RESULTS_DIR/v2_allocs.csv" &
+if [ ! -f "$BPF_OBJ" ]; then
+    fail "BPF object not found: $BPF_OBJ"
+    echo -e "${RED}Did you build the project? BPF object required.${RESET}"
+    exit 1
+fi
+
+rm -f "$RESULTS_DIR/v2_allocs.csv"
+
+COLLECT_LOG="$RESULTS_DIR/collector.log"
+sudo $COLLECT -p 0 -b "$BENCH_V2" -B "$BPF_OBJ" -d 10 -o "$RESULTS_DIR/v2_allocs.csv" -v > "$COLLECT_LOG" 2>&1 &
 COLLECT_PID=$!
 info "Collector PID: $COLLECT_PID"
 
-sleep 2
+sleep 3
+
+if ! kill -0 $COLLECT_PID 2>/dev/null; then
+    fail "Collector process died immediately!"
+    echo "Collector log:"
+    cat "$COLLECT_LOG"
+    exit 1
+fi
+ok "Collector is running"
 
 $BENCH_V2 &
 BENCH_PID=$!
@@ -168,13 +200,24 @@ info "Benchmark PID: $BENCH_PID"
 wait $BENCH_PID 2>/dev/null || true
 info "Benchmark done."
 
-sleep 1
+sleep 2
+
 sudo kill $COLLECT_PID 2>/dev/null || true
 wait $COLLECT_PID 2>/dev/null || true
 info "Collector finished."
 
+if [ -f "$COLLECT_LOG" ]; then
+    COLLECT_ERRORS=$(grep -ci "error\|fail\|denied" "$COLLECT_LOG" 2>/dev/null || echo "0")
+    if [ "$COLLECT_ERRORS" -gt 0 ]; then
+        warn "Collector log has $COLLECT_ERRORS error(s):"
+        grep -i "error\|fail\|denied" "$COLLECT_LOG" | head -10
+    fi
+fi
+
 if [ ! -f "$RESULTS_DIR/v2_allocs.csv" ]; then
-    echo -e "${RED}No CSV file generated!${RESET}"
+    fail "No CSV file generated!"
+    echo "Collector log (last 20 lines):"
+    tail -20 "$COLLECT_LOG" 2>/dev/null || echo "(no log)"
     exit 1
 fi
 

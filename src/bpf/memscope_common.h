@@ -48,6 +48,9 @@ enum event_type {
     EVENT_MMAP          = 4,
     EVENT_MUNMAP        = 5,
     EVENT_STACK_SAMPLE  = 6,
+    EVENT_CALLOC_RETURN = 7,
+    EVENT_REALLOC_ENTRY = 8,
+    EVENT_REALLOC_RETURN = 9,
 };
 
 struct mem_event {
@@ -83,6 +86,21 @@ struct mem_event {
         struct {
             __u64 regs[6];
         } stack_sample;
+        struct {
+            __u64 addr;
+            __u64 size;
+            __u64 pcs[MAX_STACK_DEPTH];
+        } calloc_ret;
+        struct {
+            __u64 old_addr;
+            __u64 new_size;
+        } realloc_entry;
+        struct {
+            __u64 addr;
+            __u64 size;
+            __u64 old_addr;
+            __u64 pcs[MAX_STACK_DEPTH];
+        } realloc_ret;
     };
 };
 

@@ -13,7 +13,7 @@ struct bpf_link;
 #define MAX_EVENTS 16384
 #define MAX_SYM_LEN 256
 #define MAX_STACK_FRAMES 128
-#define MAX_ATTACH_POINTS 16
+#define MAX_ATTACH_POINTS 24
 
 #define ALLOC_HASH_BITS 16
 #define ALLOC_HASH_SIZE (1 << ALLOC_HASH_BITS)
@@ -26,6 +26,9 @@ enum event_type {
     EVENT_MMAP          = 4,
     EVENT_MUNMAP        = 5,
     EVENT_STACK_SAMPLE  = 6,
+    EVENT_CALLOC_RETURN = 7,
+    EVENT_REALLOC_ENTRY = 8,
+    EVENT_REALLOC_RETURN = 9,
 };
 
 struct mem_event {
@@ -43,6 +46,9 @@ struct mem_event {
         struct { uint64_t addr; uint64_t size; int32_t prot; int32_t flags; } mmap_evt;
         struct { uint64_t addr; uint64_t size; } munmap_evt;
         struct { uint64_t regs[6]; } stack_sample;
+        struct { uint64_t addr; uint64_t size; uint64_t pcs[MAX_STACK_DEPTH]; } calloc_ret;
+        struct { uint64_t old_addr; uint64_t new_size; } realloc_entry;
+        struct { uint64_t addr; uint64_t size; uint64_t old_addr; uint64_t pcs[MAX_STACK_DEPTH]; } realloc_ret;
     };
 };
 

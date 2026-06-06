@@ -154,6 +154,59 @@ static int handle_event(void *ctx, void *data, size_t size)
         break;
     }
 
+    case EVENT_CALLOC_RETURN: {
+        static int calloc_log_count = 0;
+        if (calloc_log_count < 10) {
+            fprintf(stderr, "[DEBUG] CALLOC_RETURN: addr=0x%lx size=%lu stack_id=%ld depth=%u\n",
+                    evt->calloc_ret.addr, evt->calloc_ret.size, evt->stack_id, evt->stack_depth);
+            calloc_log_count++;
+        }
+        struct alloc_record rec = {};
+        rec.addr = evt->calloc_ret.addr;
+        rec.size = evt->calloc_ret.size;
+        rec.timestamp_alloc = evt->timestamp;
+        rec.pid = evt->pid;
+        rec.tid = evt->tid;
+        rec.live = 1;
+        rec.stack_id = evt->stack_id;
+        rec.stack_depth = evt->stack_depth;
+        if (evt->stack_depth > 0 && evt->stack_depth <= MAX_STACK_DEPTH) {
+            memcpy(rec.stack_pcs, evt->calloc_ret.pcs,
+                   evt->stack_depth * sizeof(uint64_t));
+        }
+        rec.hash_next = -1;
+        add_alloc_record(&cctx->table, &rec);
+        break;
+    }
+
+    case EVENT_REALLOC_ENTRY:
+        break;
+
+    case EVENT_REALLOC_RETURN: {
+        static int realloc_log_count = 0;
+        if (realloc_log_count < 10) {
+            fprintf(stderr, "[DEBUG] REALLOC_RETURN: addr=0x%lx size=%lu stack_id=%ld depth=%u\n",
+                    evt->realloc_ret.addr, evt->realloc_ret.size, evt->stack_id, evt->stack_depth);
+            realloc_log_count++;
+        }
+        struct alloc_record rec = {};
+        rec.addr = evt->realloc_ret.addr;
+        rec.size = evt->realloc_ret.size;
+        rec.timestamp_alloc = evt->timestamp;
+        rec.pid = evt->pid;
+        rec.tid = evt->tid;
+        rec.live = 1;
+        rec.stack_id = evt->stack_id;
+        rec.stack_depth = evt->stack_depth;
+        if (evt->stack_depth > 0 && evt->stack_depth <= MAX_STACK_DEPTH) {
+            memcpy(rec.stack_pcs, evt->realloc_ret.pcs,
+                   evt->stack_depth * sizeof(uint64_t));
+        }
+        rec.hash_next = -1;
+        add_alloc_record(&cctx->table, &rec);
+        break;
+    }
+
     case EVENT_FREE: {
         struct alloc_record *rec = find_live_alloc(&cctx->table,
                                                     evt->free_evt.addr);
@@ -222,11 +275,15 @@ static int attach_uprobes(struct collector_ctx *ctx, struct bpf_object *obj)
         const char *func_name;
         int retprobe;
     } probes[] = {
-        { "uprobe_malloc_entry",   "malloc",  0 },
-        { "uprobe_malloc_return",  "malloc",  1 },
-        { "uprobe_free",           "free",    0 },
-        { "uprobe_mmap_entry",     "mmap",    0 },
-        { "uprobe_munmap_entry",   "munmap",  0 },
+        { "uprobe_malloc_entry",    "malloc",   0 },
+        { "uprobe_malloc_return",   "malloc",   1 },
+        { "uprobe_calloc_entry",    "calloc",   0 },
+        { "uprobe_calloc_return",   "calloc",   1 },
+        { "uprobe_realloc_entry",   "realloc",  0 },
+        { "uprobe_realloc_return",  "realloc",  1 },
+        { "uprobe_free",            "free",     0 },
+        { "uprobe_mmap_entry",      "mmap",     0 },
+        { "uprobe_munmap_entry",    "munmap",   0 },
     };
 
     ctx->link_count = 0;
