@@ -137,6 +137,7 @@ private:
     std::vector<uint64_t> resolve_stack_pcs(int64_t stack_id) const;
     uint64_t va_to_file_offset(uint64_t va) const;
     int64_t compute_aslr_offset(const std::vector<uint64_t> &runtime_pcs) const;
+    int64_t compute_aslr_from_global_addr(uint64_t runtime_addr) const;
 
     DwarfAnalyzer analyzer_;
     SourceCodeAnalyzer source_analyzer_;

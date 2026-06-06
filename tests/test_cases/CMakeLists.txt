@@ -1,0 +1,3 @@
+add_executable(test_global_resolution test_global_resolution.c)
+target_compile_options(test_global_resolution PRIVATE -g -O0)
+target_link_libraries(test_global_resolution PRIVATE m)

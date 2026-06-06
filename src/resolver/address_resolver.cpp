@@ -378,6 +378,53 @@ int64_t AddressResolver::compute_aslr_offset(const std::vector<uint64_t> &runtim
     return 0;
 }
 
+int64_t AddressResolver::compute_aslr_from_global_addr(uint64_t runtime_addr) const
+{
+    uint64_t page_offset = runtime_addr & 0xFFF;
+
+    const auto &symbols = analyzer_.get_all_symbols();
+
+    std::map<int64_t, int> offset_counts;
+
+    for (const auto &sym : symbols) {
+        if (sym.address == 0 || sym.sym_type != SymbolInfo::SYM_OBJECT)
+            continue;
+
+        uint64_t compile_page_base = sym.address & ~0xFFFULL;
+        uint64_t potential_compile_addr = compile_page_base | page_offset;
+
+        if (potential_compile_addr < sym.address)
+            continue;
+        if (sym.size > 0 && potential_compile_addr >= sym.address + sym.size)
+            continue;
+
+        int64_t potential_aslr = (int64_t)runtime_addr - (int64_t)potential_compile_addr;
+
+        if (potential_aslr < 0x1000000LL || potential_aslr > 0x1000000000000LL)
+            continue;
+
+        int64_t rounded_offset = (potential_aslr / 0x1000) * 0x1000;
+        offset_counts[rounded_offset]++;
+    }
+
+    if (!offset_counts.empty()) {
+        int64_t best_offset = 0;
+        int best_count = 0;
+        for (const auto &p : offset_counts) {
+            if (p.second > best_count) {
+                best_count = p.second;
+                best_offset = p.first;
+            }
+        }
+
+        debug_log("[DEBUG] ASLR offset from global addr: %ld (count=%d)\n",
+                  best_offset, best_count);
+        return best_offset;
+    }
+
+    return 0;
+}
+
 uint64_t AddressResolver::va_to_file_offset(uint64_t va) const
 {
     if (va < 0x100000) {
@@ -726,6 +773,19 @@ std::optional<ResolvedAddress> AddressResolver::resolve(
 std::optional<ResolvedAddress> AddressResolver::resolve_global(uint64_t address) const
 {
     const SymbolInfo *sym = analyzer_.find_symbol_by_addr(address);
+    int64_t global_aslr = 0;
+
+    if (!sym) {
+        global_aslr = compute_aslr_from_global_addr(address);
+        if (global_aslr != 0) {
+            uint64_t compile_addr = address - global_aslr;
+            debug_log("[DEBUG] resolve_global: direct lookup failed (PIE binary), "
+                      "ASLR=%ld, compile_addr=0x%lx\n",
+                      global_aslr, compile_addr);
+            sym = analyzer_.find_symbol_by_addr(compile_addr);
+        }
+    }
+
     if (!sym)
         return std::nullopt;
 
@@ -736,7 +796,14 @@ std::optional<ResolvedAddress> AddressResolver::resolve_global(uint64_t address)
     result.type_name = sym->type_name;
 
     if (!sym->type_name.empty()) {
-        uint64_t offset = address - sym->address;
+        uint64_t offset;
+        if (global_aslr != 0) {
+            uint64_t compile_addr = address - global_aslr;
+            offset = compile_addr - sym->address;
+        } else {
+            offset = address - sym->address;
+        }
+
         auto field = analyzer_.resolve_field_at_offset(sym->type_name, offset);
         if (field) {
             ResolvedField rf = {};
@@ -1055,6 +1122,17 @@ void AddressResolver::detect_binary_ranges()
             min_addr = start;
         if (end > max_addr)
             max_addr = end;
+    }
+    
+    const auto &symbols = analyzer_.get_all_symbols();
+    for (const auto &sym : symbols) {
+        if (sym.address == 0)
+            continue;
+        if (sym.address < min_addr)
+            min_addr = sym.address;
+        uint64_t sym_end = sym.address + (sym.size > 0 ? sym.size : 1);
+        if (sym_end > max_addr)
+            max_addr = sym_end;
     }
     
     if (min_addr != UINT64_MAX && max_addr > min_addr) {

@@ -81,6 +81,17 @@ int DwarfAnalyzer::load_binary(const std::string &path)
     rc |= parse_dwarf_info();
     parse_dwarf_frames();
 
+    std::sort(symbols_.begin(), symbols_.end(),
+              [](const SymbolInfo &a, const SymbolInfo &b) {
+                  if (a.address != b.address)
+                      return a.address < b.address;
+                  return a.type_name.empty() && !b.type_name.empty();
+              });
+
+    symbol_addr_index_.clear();
+    for (size_t i = 0; i < symbols_.size(); i++)
+        symbol_addr_index_[symbols_[i].address] = i;
+
     loaded_ = true;
     return rc;
 }
@@ -146,7 +157,9 @@ int DwarfAnalyzer::parse_symbol_table()
 
     std::sort(symbols_.begin(), symbols_.end(),
               [](const SymbolInfo &a, const SymbolInfo &b) {
-                  return a.address < b.address;
+                  if (a.address != b.address)
+                      return a.address < b.address;
+                  return a.type_name.empty() && !b.type_name.empty();
               });
 
     for (size_t i = 0; i < symbols_.size(); i++)
@@ -518,6 +531,10 @@ void DwarfAnalyzer::process_variable_die(void *die_v)
             if (type_name)
                 sym.type_name = type_name;
             sym.type_die_offset = dwarf_dieoffset(&type_die);
+
+            Dwarf_Word type_size = 0;
+            if (dwarf_aggregate_size(&type_die, &type_size) == 0 && type_size > 0)
+                sym.size = type_size;
         }
     }
 

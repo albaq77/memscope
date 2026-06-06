@@ -63,6 +63,7 @@ add_subdirectory(src/collector)
 add_subdirectory(src/dwarf)
 add_subdirectory(src/resolver)
 add_subdirectory(src/benchmark)
+add_subdirectory(tests/test_cases)
 
 install(TARGETS memscope-collect memscope-resolve
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
