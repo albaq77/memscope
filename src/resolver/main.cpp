@@ -64,10 +64,46 @@ static std::vector<memscope::AllocInfo> load_csv(const std::string &csv_path)
     while (std::getline(ifs, line)) {
         memscope::AllocInfo info = {};
         char live_str[8] = {};
-        if (sscanf(line.c_str(), "0x%lx,%lu,%u,%u,%7[^,],%lu,%lu",
+        long stack_id_val = 0;
+        int stack_depth_val = 0;
+
+        int parsed = sscanf(line.c_str(), "0x%lx,%lu,%u,%u,%7[^,],%lu,%lu,%ld,%d",
                    &info.addr, &info.size, &info.pid, &info.tid,
-                   live_str, &info.timestamp, &info.timestamp) >= 5) {
+                   live_str, &info.timestamp, &info.timestamp,
+                   &stack_id_val, &stack_depth_val);
+
+        if (parsed >= 5) {
             info.live = (strcmp(live_str, "1") == 0);
+            info.stack_id = stack_id_val;
+            info.stack_depth = stack_depth_val;
+
+            if (parsed >= 9) {
+                size_t pos = 0;
+                int comma_count = 0;
+                for (size_t i = 0; i < line.size(); i++) {
+                    if (line[i] == ',') {
+                        comma_count++;
+                        if (comma_count == 9) {
+                            pos = i + 1;
+                            break;
+                        }
+                    }
+                }
+                if (pos > 0 && pos < line.size()) {
+                    std::string pcs_str = line.substr(pos);
+                    if (!pcs_str.empty()) {
+                        std::istringstream iss(pcs_str);
+                        std::string token;
+                        while (std::getline(iss, token, ';')) {
+                            uint64_t pc = 0;
+                            if (sscanf(token.c_str(), "0x%lx", &pc) == 1 && pc != 0) {
+                                info.stack_pcs.push_back(pc);
+                            }
+                        }
+                    }
+                }
+            }
+
             allocs.push_back(info);
         }
     }
@@ -135,6 +171,7 @@ static int cmd_batch(memscope::AddressResolver &resolver, const std::string &csv
 {
     auto allocs = load_csv(csv_path);
     resolver.set_alloc_table(allocs);
+    resolver.set_debug_log("memscope_debug.log");
 
     FILE *out = stdout;
     if (!output_path.empty()) {
@@ -145,7 +182,7 @@ static int cmd_batch(memscope::AddressResolver &resolver, const std::string &csv
         }
     }
 
-    fprintf(out, "address,size,region,type,field,offset,size_bytes,field_type\n");
+    fprintf(out, "address,size,region,type,field,offset,size_bytes,field_type,infer_method,confidence\n");
 
     size_t matched = 0;
     size_t total = allocs.size();
@@ -154,7 +191,7 @@ static int cmd_batch(memscope::AddressResolver &resolver, const std::string &csv
     for (const auto &alloc : allocs) {
         auto result = resolver.resolve(alloc.addr, alloc.pid);
         if (!result) {
-            fprintf(out, "0x%lx,%lu,UNKNOWN,,,,,\n", alloc.addr, alloc.size);
+            fprintf(out, "0x%lx,%lu,UNKNOWN,,,,,,,,\n", alloc.addr, alloc.size);
             continue;
         }
 
@@ -162,28 +199,57 @@ static int cmd_batch(memscope::AddressResolver &resolver, const std::string &csv
                           result->addr_class == memscope::ResolvedAddress::ADDR_HEAP   ? "HEAP"   :
                           result->addr_class == memscope::ResolvedAddress::ADDR_STACK  ? "STACK"  : "UNKNOWN";
 
+        std::string infer_method;
+        std::string confidence;
+        if (result->addr_class == memscope::ResolvedAddress::ADDR_HEAP) {
+            size_t paren = result->allocation_callsite.find('(');
+            size_t end = result->allocation_callsite.find(')', paren);
+            if (paren != std::string::npos && end != std::string::npos) {
+                infer_method = result->allocation_callsite.substr(0, paren - 1);
+                confidence = result->allocation_callsite.substr(paren + 1, end - paren - 1);
+            } else {
+                infer_method = result->allocation_callsite;
+            }
+        }
+
         if (result->type_name.empty()) {
-            fprintf(out, "0x%lx,%lu,%s,,,,,\n", alloc.addr, alloc.size, cls);
+            fprintf(out, "0x%lx,%lu,%s,,,,,,%s,%s\n",
+                    alloc.addr, alloc.size, cls,
+                    infer_method.c_str(), confidence.c_str());
             continue;
         }
 
         matched++;
 
-        const memscope::TypeInfo *type_info = analyzer.find_type_by_name(result->type_name);
-        if (!type_info || type_info->fields.empty()) {
-            fprintf(out, "0x%lx,%lu,%s,%s,,,,\n",
-                    alloc.addr, alloc.size, cls,
-                    result->type_name.c_str());
-            continue;
-        }
+        if (result->fields.empty()) {
+            const memscope::TypeInfo *type_info = analyzer.find_type_by_name(result->type_name);
+            if (!type_info || type_info->fields.empty()) {
+                fprintf(out, "0x%lx,%lu,%s,%s,,,,,%s,%s\n",
+                        alloc.addr, alloc.size, cls,
+                        result->type_name.c_str(),
+                        infer_method.c_str(), confidence.c_str());
+                continue;
+            }
 
-        for (const auto &f : type_info->fields) {
-            fprintf(out, "0x%lx,%lu,%s,%s,%s.%s,%lu,%lu,%s\n",
-                    alloc.addr, alloc.size, cls,
-                    result->type_name.c_str(),
-                    result->type_name.c_str(), f.name.c_str(),
-                    f.byte_offset, f.byte_size,
-                    f.type_name.empty() ? "" : f.type_name.c_str());
+            for (const auto &f : type_info->fields) {
+                fprintf(out, "0x%lx,%lu,%s,%s,%s.%s,%lu,%lu,%s,%s,%s\n",
+                        alloc.addr + f.byte_offset, alloc.size, cls,
+                        result->type_name.c_str(),
+                        result->type_name.c_str(), f.name.c_str(),
+                        f.byte_offset, f.byte_size,
+                        f.type_name.empty() ? "" : f.type_name.c_str(),
+                        infer_method.c_str(), confidence.c_str());
+            }
+        } else {
+            for (const auto &f : result->fields) {
+                fprintf(out, "0x%lx,%lu,%s,%s,%s,%lu,%lu,%s,%s,%s\n",
+                        f.resolved_address, alloc.size, cls,
+                        result->type_name.c_str(),
+                        f.full_path.c_str(),
+                        f.field_byte_offset, f.field_byte_size,
+                        f.field_type_name.empty() ? "" : f.field_type_name.c_str(),
+                        infer_method.c_str(), confidence.c_str());
+            }
         }
     }
 

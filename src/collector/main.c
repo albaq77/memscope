@@ -32,13 +32,19 @@ static void print_usage(const char *prog)
 
 static void write_csv_batch(FILE *fp, struct alloc_table *table)
 {
-    fprintf(fp, "address,size,pid,tid,live,timestamp_alloc,timestamp_free\n");
+    fprintf(fp, "address,size,pid,tid,live,timestamp_alloc,timestamp_free,stack_id,stack_depth,stack_pcs\n");
     for (size_t i = 0; i < table->count; i++) {
         struct alloc_record *r = &table->records[i];
-        fprintf(fp, "0x%lx,%lu,%u,%u,%s,%lu,%lu\n",
+        fprintf(fp, "0x%lx,%lu,%u,%u,%s,%lu,%lu,%ld,%d,",
                 r->addr, r->size, r->pid, r->tid,
                 r->live ? "1" : "0",
-                r->timestamp_alloc, r->timestamp_free);
+                r->timestamp_alloc, r->timestamp_free,
+                r->stack_id, r->stack_depth);
+        for (int j = 0; j < r->stack_depth && j < MAX_STACK_DEPTH; j++) {
+            if (j > 0) fputc(';', fp);
+            fprintf(fp, "0x%lx", r->stack_pcs[j]);
+        }
+        fputc('\n', fp);
     }
 }
 
@@ -129,7 +135,7 @@ int main(int argc, char **argv)
 
     printf("\nStopping collector...\n");
     collector_stop(ctx);
-    collector_dump_allocs(ctx);
+    // collector_dump_allocs(ctx);
 
     if (output_path) {
         FILE *fp = fopen(output_path, "w");

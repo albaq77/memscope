@@ -7,3 +7,7 @@ cmake-build-*/
 
 compile_commands.json
 .cache/
+
+results/
+.trae/
+*.log

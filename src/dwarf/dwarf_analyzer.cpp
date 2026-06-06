@@ -16,148 +16,16 @@
 
 namespace memscope {
 
-namespace {
-
-class ScopedFd {
-public:
-    explicit ScopedFd(int fd = -1) : fd_(fd) {}
-    ~ScopedFd() { if (fd_ >= 0) close(fd_); }
-
-    ScopedFd(const ScopedFd&) = delete;
-    ScopedFd& operator=(const ScopedFd&) = delete;
-
-    ScopedFd(ScopedFd&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
-    ScopedFd& operator=(ScopedFd&& other) noexcept {
-        if (this != &other) {
-            if (fd_ >= 0) close(fd_);
-            fd_ = other.fd_;
-            other.fd_ = -1;
-        }
-        return *this;
-    }
-
-    int get() const { return fd_; }
-    int release() { int fd = fd_; fd_ = -1; return fd; }
-    bool valid() const { return fd_ >= 0; }
-
-private:
-    int fd_;
-};
-
-class ScopedMmap {
-public:
-    ScopedMmap() : ptr_(nullptr), size_(0) {}
-    ScopedMmap(void* ptr, size_t size) : ptr_(ptr), size_(size) {}
-    ~ScopedMmap() { if (ptr_ && ptr_ != MAP_FAILED) munmap(ptr_, size_); }
-
-    ScopedMmap(const ScopedMmap&) = delete;
-    ScopedMmap& operator=(const ScopedMmap&) = delete;
-
-    ScopedMmap(ScopedMmap&& other) noexcept
-        : ptr_(other.ptr_), size_(other.size_) {
-        other.ptr_ = nullptr;
-        other.size_ = 0;
-    }
-    ScopedMmap& operator=(ScopedMmap&& other) noexcept {
-        if (this != &other) {
-            if (ptr_ && ptr_ != MAP_FAILED) munmap(ptr_, size_);
-            ptr_ = other.ptr_;
-            size_ = other.size_;
-            other.ptr_ = nullptr;
-            other.size_ = 0;
-        }
-        return *this;
-    }
-
-    void* get() const { return ptr_; }
-    size_t size() const { return size_; }
-    void release() { ptr_ = nullptr; size_ = 0; }
-    bool valid() const { return ptr_ != nullptr && ptr_ != MAP_FAILED; }
-
-private:
-    void*  ptr_;
-    size_t size_;
-};
-
-class ScopedElf {
-public:
-    explicit ScopedElf(Elf* elf = nullptr) : elf_(elf) {}
-    ~ScopedElf() { if (elf_) elf_end(elf_); }
-
-    ScopedElf(const ScopedElf&) = delete;
-    ScopedElf& operator=(const ScopedElf&) = delete;
-
-    ScopedElf(ScopedElf&& other) noexcept : elf_(other.elf_) { other.elf_ = nullptr; }
-    ScopedElf& operator=(ScopedElf&& other) noexcept {
-        if (this != &other) {
-            if (elf_) elf_end(elf_);
-            elf_ = other.elf_;
-            other.elf_ = nullptr;
-        }
-        return *this;
-    }
-
-    Elf* get() const { return elf_; }
-    Elf* release() { Elf* e = elf_; elf_ = nullptr; return e; }
-    bool valid() const { return elf_ != nullptr; }
-
-private:
-    Elf* elf_;
-};
-
-class ScopedDwarf {
-public:
-    explicit ScopedDwarf(Dwarf* dwarf = nullptr) : dwarf_(dwarf) {}
-    ~ScopedDwarf() { if (dwarf_) dwarf_end(dwarf_); }
-
-    ScopedDwarf(const ScopedDwarf&) = delete;
-    ScopedDwarf& operator=(const ScopedDwarf&) = delete;
-
-    ScopedDwarf(ScopedDwarf&& other) noexcept : dwarf_(other.dwarf_) { other.dwarf_ = nullptr; }
-    ScopedDwarf& operator=(ScopedDwarf&& other) noexcept {
-        if (this != &other) {
-            if (dwarf_) dwarf_end(dwarf_);
-            dwarf_ = other.dwarf_;
-            other.dwarf_ = nullptr;
-        }
-        return *this;
-    }
-
-    Dwarf* get() const { return dwarf_; }
-    Dwarf* release() { Dwarf* d = dwarf_; dwarf_ = nullptr; return d; }
-    bool valid() const { return dwarf_ != nullptr; }
-
-private:
-    Dwarf* dwarf_;
-};
-
-}
-
 DwarfAnalyzer::DwarfAnalyzer()
     : loaded_(false)
+    , elf_fd_(-1)
+    , elf_mmap_()
     , elf_ptr_(nullptr)
     , dwarf_ptr_(nullptr)
-    , elf_fd_(-1)
-    , elf_data_(nullptr)
-    , elf_size_(0)
 {
 }
 
-DwarfAnalyzer::~DwarfAnalyzer()
-{
-    if (elf_data_ && elf_size_) {
-        munmap(elf_data_, elf_size_);
-    }
-    if (elf_fd_ >= 0) {
-        close(elf_fd_);
-    }
-    if (dwarf_ptr_) {
-        dwarf_end((Dwarf *)dwarf_ptr_);
-    }
-    if (elf_ptr_) {
-        elf_end((Elf *)elf_ptr_);
-    }
-}
+DwarfAnalyzer::~DwarfAnalyzer() = default;
 
 int DwarfAnalyzer::load_binary(const std::string &path)
 {
@@ -203,17 +71,26 @@ int DwarfAnalyzer::load_binary(const std::string &path)
         fprintf(stderr, "no DWARF info in %s, falling back to symbol table\n", path.c_str());
     }
 
-    elf_fd_ = fd.release();
-    elf_data_ = static_cast<uint8_t*>(mmap_guard.get());
-    elf_size_ = mmap_guard.size();
-    mmap_guard.release();
-    elf_ptr_ = elf_guard.release();
-    dwarf_ptr_ = dwarf_guard.valid() ? dwarf_guard.release() : nullptr;
+    elf_fd_ = std::move(fd);
+    elf_mmap_ = std::move(mmap_guard);
+    elf_ptr_ = std::move(elf_guard);
+    dwarf_ptr_ = std::move(dwarf_guard);
 
     int rc = 0;
     rc |= parse_symbol_table();
     rc |= parse_dwarf_info();
-    rc |= parse_dwarf_frames();
+    parse_dwarf_frames();
+
+    std::sort(symbols_.begin(), symbols_.end(),
+              [](const SymbolInfo &a, const SymbolInfo &b) {
+                  if (a.address != b.address)
+                      return a.address < b.address;
+                  return a.type_name.empty() && !b.type_name.empty();
+              });
+
+    symbol_addr_index_.clear();
+    for (size_t i = 0; i < symbols_.size(); i++)
+        symbol_addr_index_[symbols_[i].address] = i;
 
     loaded_ = true;
     return rc;
@@ -221,7 +98,7 @@ int DwarfAnalyzer::load_binary(const std::string &path)
 
 int DwarfAnalyzer::parse_symbol_table()
 {
-    Elf *elf = (Elf *)elf_ptr_;
+    Elf *elf = elf_ptr_.get();
     Elf_Scn *scn = nullptr;
     GElf_Shdr shdr;
 
@@ -280,7 +157,9 @@ int DwarfAnalyzer::parse_symbol_table()
 
     std::sort(symbols_.begin(), symbols_.end(),
               [](const SymbolInfo &a, const SymbolInfo &b) {
-                  return a.address < b.address;
+                  if (a.address != b.address)
+                      return a.address < b.address;
+                  return a.type_name.empty() && !b.type_name.empty();
               });
 
     for (size_t i = 0; i < symbols_.size(); i++)
@@ -306,9 +185,9 @@ TypeInfo::Tag DwarfAnalyzer::map_tag(uint64_t dwarf_tag)
 
 int DwarfAnalyzer::parse_dwarf_info()
 {
-    Dwarf *dbg = (Dwarf *)dwarf_ptr_;
+    Dwarf *dbg = dwarf_ptr_.get();
     if (!dbg)
-        return -1;
+        return 0;
 
     Dwarf_Off off = 0;
     Dwarf_Off next_off;
@@ -493,6 +372,7 @@ void DwarfAnalyzer::process_subprogram_die(void *die_v)
     Dwarf_Die *die = (Dwarf_Die *)die_v;
 
     SubprogramInfo info = {};
+    info.die_offset = dwarf_dieoffset(die);
 
     const char *name = dwarf_diename(die);
     if (name)
@@ -540,7 +420,77 @@ void DwarfAnalyzer::process_subprogram_die(void *die_v)
             info.source_line = (uint32_t)line;
     }
 
+    Dwarf_Die child;
+    if (dwarf_child(die, &child) == 0) {
+        do {
+            int child_tag = dwarf_tag(&child);
+            if (child_tag == DW_TAG_variable) {
+                Dwarf_Attribute var_type_attr;
+                if (dwarf_attr(&child, DW_AT_type, &var_type_attr)) {
+                    LocalVariableInfo var_info = {};
+                    var_info.is_pointer = false;
+                    var_info.type_die_offset = 0;
+                    var_info.pointer_target_type_offset = 0;
+
+                    const char *var_name = dwarf_diename(&child);
+                    if (var_name)
+                        var_info.name = var_name;
+
+                    Dwarf_Die type_die;
+                    if (dwarf_formref_die(&var_type_attr, &type_die)) {
+                        var_info.type_die_offset = dwarf_dieoffset(&type_die);
+                        const char *type_name = dwarf_diename(&type_die);
+                        if (type_name)
+                            var_info.type_name = type_name;
+
+                        int type_tag = dwarf_tag(&type_die);
+                        if (type_tag == DW_TAG_pointer_type) {
+                            var_info.is_pointer = true;
+                            Dwarf_Attribute ptr_target_attr;
+                            if (dwarf_attr(&type_die, DW_AT_type, &ptr_target_attr)) {
+                                Dwarf_Die target_type_die;
+                                if (dwarf_formref_die(&ptr_target_attr, &target_type_die)) {
+                                    var_info.pointer_target_type_offset = dwarf_dieoffset(&target_type_die);
+                                    const char *target_name = dwarf_diename(&target_type_die);
+                                    if (target_name)
+                                        var_info.pointer_target_type_name = target_name;
+                                }
+                            }
+                        } else if (type_tag == DW_TAG_array_type) {
+                            Dwarf_Attribute elem_attr;
+                            if (dwarf_attr(&type_die, DW_AT_type, &elem_attr)) {
+                                Dwarf_Die elem_type_die;
+                                if (dwarf_formref_die(&elem_attr, &elem_type_die)) {
+                                    int elem_tag = dwarf_tag(&elem_type_die);
+                                    if (elem_tag == DW_TAG_pointer_type) {
+                                        var_info.is_pointer = true;
+                                        Dwarf_Attribute ptr_target_attr;
+                                        if (dwarf_attr(&elem_type_die, DW_AT_type, &ptr_target_attr)) {
+                                            Dwarf_Die target_type_die;
+                                            if (dwarf_formref_die(&ptr_target_attr, &target_type_die)) {
+                                                var_info.pointer_target_type_offset = dwarf_dieoffset(&target_type_die);
+                                                const char *target_name = dwarf_diename(&target_type_die);
+                                                if (target_name)
+                                                    var_info.pointer_target_type_name = target_name;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (!var_info.name.empty())
+                        info.local_variables.push_back(var_info);
+                }
+            }
+        } while (dwarf_siblingof(&child, &child) == 0);
+    }
+
     subprograms_.push_back(info);
+    subprogram_name_index_[info.name] = subprograms_.size() - 1;
+    if (!info.linkage_name.empty())
+        subprogram_name_index_[info.linkage_name] = subprograms_.size() - 1;
 }
 
 void DwarfAnalyzer::process_variable_die(void *die_v)
@@ -581,6 +531,10 @@ void DwarfAnalyzer::process_variable_die(void *die_v)
             if (type_name)
                 sym.type_name = type_name;
             sym.type_die_offset = dwarf_dieoffset(&type_die);
+
+            Dwarf_Word type_size = 0;
+            if (dwarf_aggregate_size(&type_die, &type_size) == 0 && type_size > 0)
+                sym.size = type_size;
         }
     }
 
@@ -599,6 +553,45 @@ void DwarfAnalyzer::process_variable_die(void *die_v)
 
 int DwarfAnalyzer::parse_dwarf_frames()
 {
+    Dwarf *dbg = dwarf_ptr_.get();
+    if (!dbg)
+        return 0;
+
+    Dwarf_CFI *cfi = dwarf_getcfi(dbg);
+    if (!cfi)
+        return 0;
+
+    for (const auto &sp : subprograms_) {
+        if (sp.low_pc == 0)
+            continue;
+
+        uint64_t start = sp.low_pc;
+        uint64_t end = sp.high_pc_is_offset ? sp.low_pc + sp.high_pc : sp.high_pc;
+        if (end <= start)
+            continue;
+
+        Dwarf_Frame *frame = nullptr;
+        if (dwarf_cfi_addrframe(cfi, start, &frame) != 0)
+            continue;
+
+        FDERecord rec = {};
+        rec.fde_offset = 0;
+        rec.cie_pointer = 0;
+        rec.initial_location = start;
+        rec.address_range = end - start;
+        rec.cie = nullptr;
+
+        Dwarf_Op *cfa_ops = nullptr;
+        size_t cfa_nops = 0;
+        if (dwarf_frame_cfa(frame, &cfa_ops, &cfa_nops) == 0 && cfa_ops) {
+            (void)cfa_ops;
+            (void)cfa_nops;
+        }
+
+        fde_records_.push_back(rec);
+        free(frame);
+    }
+
     return 0;
 }
 
@@ -615,6 +608,55 @@ int DwarfAnalyzer::parse_dwarf_types()
 int DwarfAnalyzer::parse_dwarf_line()
 {
     return 0;
+}
+
+std::optional<std::pair<std::string, uint32_t>> DwarfAnalyzer::resolve_source_line(uint64_t pc) const
+{
+    Dwarf *dbg = dwarf_ptr_.get();
+    if (!dbg)
+        return std::nullopt;
+
+    Dwarf_Off off = 0;
+    Dwarf_Off next_off;
+    size_t    cu_hdr_size;
+
+    while (dwarf_nextcu(dbg, off, &next_off, &cu_hdr_size, nullptr, nullptr, nullptr) == 0) {
+        Dwarf_Die cudie;
+        if (dwarf_offdie(dbg, off + cu_hdr_size, &cudie) == nullptr) {
+            off = next_off;
+            continue;
+        }
+
+        if (dwarf_haspc(&cudie, pc) != 1) {
+            off = next_off;
+            continue;
+        }
+
+        Dwarf_Lines *lines = nullptr;
+        size_t nlines = 0;
+        if (dwarf_getsrclines(&cudie, &lines, &nlines) != 0) {
+            off = next_off;
+            continue;
+        }
+
+        Dwarf_Line *line = dwarf_getsrc_die(&cudie, pc);
+        if (!line) {
+            off = next_off;
+            continue;
+        }
+
+        const char *src = dwarf_linesrc(line, nullptr, nullptr);
+        if (!src) {
+            off = next_off;
+            continue;
+        }
+
+        int lineno_val = 0;
+        dwarf_lineno(line, &lineno_val);
+        return std::make_pair(std::string(src), static_cast<uint32_t>(lineno_val));
+    }
+
+    return std::nullopt;
 }
 
 int DwarfAnalyzer::parse_elf_headers()
@@ -753,20 +795,163 @@ std::string DwarfAnalyzer::type_layout_to_string(const std::string &type_name) c
 
 int64_t DwarfAnalyzer::unwind_frame(uint64_t pc, uint64_t *regs, int reg_count) const
 {
-    (void)regs;
-    (void)reg_count;
-
-    const FDERecord *fde = nullptr;
-    for (const auto &f : fde_records_) {
-        if (pc >= f.initial_location && pc < f.initial_location + f.address_range) {
-            fde = &f;
-            break;
-        }
-    }
-    if (!fde)
+    Dwarf *dbg = dwarf_ptr_.get();
+    if (!dbg)
         return -1;
 
+    Dwarf_CFI *cfi = dwarf_getcfi(dbg);
+    if (!cfi)
+        return -1;
+
+    Dwarf_Frame *frame = nullptr;
+    if (dwarf_cfi_addrframe(cfi, pc, &frame) != 0)
+        return -1;
+
+    Dwarf_Op *cfa_ops = nullptr;
+    size_t cfa_nops = 0;
+    if (dwarf_frame_cfa(frame, &cfa_ops, &cfa_nops) != 0) {
+        free(frame);
+        return -1;
+    }
+
+    if (reg_count >= 1 && cfa_nops > 0)
+        regs[0] = cfa_ops[0].number;
+
+    free(frame);
     return 0;
+}
+
+const SubprogramInfo *DwarfAnalyzer::find_subprogram_by_name(const std::string &name) const
+{
+    auto it = subprogram_name_index_.find(name);
+    if (it != subprogram_name_index_.end())
+        return &subprograms_[it->second];
+    return nullptr;
+}
+
+std::vector<StackVariableInfo> DwarfAnalyzer::find_stack_variables(uint64_t pc) const
+{
+    std::vector<StackVariableInfo> result;
+
+    Dwarf *dbg = dwarf_ptr_.get();
+    if (!dbg)
+        return result;
+
+    const SubprogramInfo *subprog = nullptr;
+    for (const auto &sp : subprograms_) {
+        if (sp.high_pc_is_offset) {
+            if (pc >= sp.low_pc && pc < sp.low_pc + sp.high_pc) {
+                subprog = &sp;
+                break;
+            }
+        } else {
+            if (pc >= sp.low_pc && pc < sp.high_pc) {
+                subprog = &sp;
+                break;
+            }
+        }
+    }
+
+    if (!subprog)
+        return result;
+
+    Dwarf_Die die;
+    if (!dwarf_offdie(dbg, subprog->die_offset, &die))
+        return result;
+
+    Dwarf_Die child;
+    if (dwarf_child(&die, &child) != 0)
+        return result;
+
+    do {
+        if (dwarf_tag(&child) != DW_TAG_variable)
+            continue;
+
+        const char *var_name = dwarf_diename(&child);
+        if (!var_name)
+            continue;
+
+        Dwarf_Attribute loc_attr;
+        if (!dwarf_attr(&child, DW_AT_location, &loc_attr))
+            continue;
+
+        Dwarf_Op *ops = nullptr;
+        size_t ops_len = 0;
+        if (dwarf_getlocation(&loc_attr, &ops, &ops_len) != 0 || ops_len == 0)
+            continue;
+
+        int64_t stack_offset = 0;
+        bool found_offset = false;
+
+        for (size_t i = 0; i < ops_len; i++) {
+            if (ops[i].atom == DW_OP_fbreg) {
+                stack_offset = ops[i].number + ops[i].offset;
+                found_offset = true;
+                break;
+            }
+            if (ops[i].atom >= DW_OP_breg0 && ops[i].atom <= DW_OP_breg31) {
+                stack_offset = ops[i].number + ops[i].offset;
+                found_offset = true;
+                break;
+            }
+        }
+
+        if (!found_offset)
+            continue;
+
+        StackVariableInfo var_info = {};
+        var_info.name = var_name;
+        var_info.stack_offset = stack_offset;
+
+        Dwarf_Attribute type_attr;
+        if (dwarf_attr(&child, DW_AT_type, &type_attr)) {
+            Dwarf_Die type_die;
+            if (dwarf_formref_die(&type_attr, &type_die)) {
+                const char *type_name = dwarf_diename(&type_die);
+                if (type_name)
+                    var_info.type_name = type_name;
+
+                Dwarf_Word type_size = 0;
+                if (dwarf_aggregate_size(&type_die, &type_size) == 0 && type_size > 0)
+                    var_info.byte_size = type_size;
+            }
+        }
+
+        result.push_back(var_info);
+    } while (dwarf_siblingof(&child, &child) == 0);
+
+    return result;
+}
+
+std::vector<std::string> DwarfAnalyzer::find_pointer_target_types_at_pc(uint64_t pc) const
+{
+    std::vector<std::string> results;
+
+    for (const auto &sp : subprograms_) {
+        bool in_range = false;
+        if (sp.high_pc_is_offset) {
+            if (pc >= sp.low_pc && pc < sp.low_pc + sp.high_pc)
+                in_range = true;
+        } else {
+            if (pc >= sp.low_pc && pc < sp.high_pc)
+                in_range = true;
+        }
+
+        if (!in_range)
+            continue;
+
+        for (const auto &var : sp.local_variables) {
+            if (var.is_pointer && !var.pointer_target_type_name.empty()) {
+                results.push_back(var.pointer_target_type_name);
+            }
+        }
+        break;
+    }
+
+    std::sort(results.begin(), results.end());
+    results.erase(std::unique(results.begin(), results.end()), results.end());
+
+    return results;
 }
 
 }

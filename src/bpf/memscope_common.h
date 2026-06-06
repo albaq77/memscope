@@ -1,12 +1,16 @@
 #ifndef __MEMSCOPE_BPF_H
 #define __MEMSCOPE_BPF_H
 
-#define MAX_STACK_DEPTH 64
+#define MAX_STACK_DEPTH 32
 #define MAX_COMM_LEN 64
 #define MAX_EVENTS 16384
 
 #ifndef BPF_MAP_TYPE_HASH
 #define BPF_MAP_TYPE_HASH 1
+#endif
+
+#ifndef BPF_MAP_TYPE_ARRAY
+#define BPF_MAP_TYPE_ARRAY 2
 #endif
 
 #ifndef BPF_MAP_TYPE_STACK_TRACE
@@ -17,12 +21,24 @@
 #define BPF_MAP_TYPE_RINGBUF 27
 #endif
 
+#ifndef BPF_MAP_TYPE_PERCPU_ARRAY
+#define BPF_MAP_TYPE_PERCPU_ARRAY 12
+#endif
+
 #ifndef BPF_ANY
 #define BPF_ANY 0
 #endif
 
+#ifndef BPF_F_USER_STACK
+#define BPF_F_USER_STACK     (1ULL << 8)
+#endif
+
 #ifndef BPF_F_FAST_STACK_CMP
-#define BPF_F_FAST_STACK_CMP 256
+#define BPF_F_FAST_STACK_CMP (1ULL << 9)
+#endif
+
+#ifndef BPF_F_REUSE_STACKID
+#define BPF_F_REUSE_STACKID  (1ULL << 10)
 #endif
 
 enum event_type {
@@ -32,6 +48,9 @@ enum event_type {
     EVENT_MMAP          = 4,
     EVENT_MUNMAP        = 5,
     EVENT_STACK_SAMPLE  = 6,
+    EVENT_CALLOC_RETURN = 7,
+    EVENT_REALLOC_ENTRY = 8,
+    EVENT_REALLOC_RETURN = 9,
 };
 
 struct mem_event {
@@ -40,6 +59,8 @@ struct mem_event {
     __u32 tid;
     __u64 timestamp;
     __s64 stack_id;
+    __u32 stack_depth;
+    __u32 _reserved;
     union {
         struct {
             __u64 size;
@@ -47,6 +68,7 @@ struct mem_event {
         struct {
             __u64 addr;
             __u64 size;
+            __u64 pcs[MAX_STACK_DEPTH];
         } malloc_ret;
         struct {
             __u64 addr;
@@ -64,6 +86,21 @@ struct mem_event {
         struct {
             __u64 regs[6];
         } stack_sample;
+        struct {
+            __u64 addr;
+            __u64 size;
+            __u64 pcs[MAX_STACK_DEPTH];
+        } calloc_ret;
+        struct {
+            __u64 old_addr;
+            __u64 new_size;
+        } realloc_entry;
+        struct {
+            __u64 addr;
+            __u64 size;
+            __u64 old_addr;
+            __u64 pcs[MAX_STACK_DEPTH];
+        } realloc_ret;
     };
 };
 
@@ -74,5 +111,17 @@ struct alloc_info {
     __u32 pid;
     __u32 tid;
 };
+
+struct stack_pcs_value {
+    __u32 depth;
+    __u32 _pad;
+    __u64 pcs[MAX_STACK_DEPTH];
+};
+
+struct pending_info {
+    __u64 size;
+    __s32 stack_id;
+    __u32 _pad;
+} __attribute__((packed, aligned(8)));
 
 #endif
