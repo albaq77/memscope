@@ -804,21 +804,57 @@ std::optional<ResolvedAddress> AddressResolver::resolve_global(uint64_t address)
             offset = address - sym->address;
         }
 
-        auto field = analyzer_.resolve_field_at_offset(sym->type_name, offset);
-        if (field) {
-            ResolvedField rf = {};
-            rf.type_name = sym->type_name;
-            rf.field_name = field->name;
-            rf.full_path = sym->type_name + "." + field->name;
-            rf.field_byte_offset = field->byte_offset;
-            rf.field_byte_size = field->byte_size;
-            rf.base_address = sym->address;
-            rf.resolved_address = address;
-            rf.field_type_name = field->type_name;
-            rf.is_bitfield = field->is_bitfield;
-            rf.bit_offset_within_field = field->is_bitfield
-                ? (offset * 8 - field->bit_offset) : 0;
-            result.fields.push_back(rf);
+        if (offset == 0) {
+            const TypeInfo *type = analyzer_.find_type_by_name(sym->type_name);
+            if (type && !type->fields.empty()) {
+                for (const auto &f : type->fields) {
+                    ResolvedField rf = {};
+                    rf.type_name = sym->type_name;
+                    rf.field_name = f.name;
+                    rf.full_path = sym->type_name + "." + f.name;
+                    rf.field_byte_offset = f.byte_offset;
+                    rf.field_byte_size = f.byte_size;
+                    rf.base_address = sym->address;
+                    rf.resolved_address = address + f.byte_offset;
+                    rf.field_type_name = f.type_name;
+                    rf.is_bitfield = f.is_bitfield;
+                    result.fields.push_back(rf);
+                }
+            } else {
+                auto field = analyzer_.resolve_field_at_offset(sym->type_name, offset);
+                if (field) {
+                    ResolvedField rf = {};
+                    rf.type_name = sym->type_name;
+                    rf.field_name = field->name;
+                    rf.full_path = sym->type_name + "." + field->name;
+                    rf.field_byte_offset = field->byte_offset;
+                    rf.field_byte_size = field->byte_size;
+                    rf.base_address = sym->address;
+                    rf.resolved_address = address;
+                    rf.field_type_name = field->type_name;
+                    rf.is_bitfield = field->is_bitfield;
+                    rf.bit_offset_within_field = field->is_bitfield
+                        ? (offset * 8 - field->bit_offset) : 0;
+                    result.fields.push_back(rf);
+                }
+            }
+        } else {
+            auto field = analyzer_.resolve_field_at_offset(sym->type_name, offset);
+            if (field) {
+                ResolvedField rf = {};
+                rf.type_name = sym->type_name;
+                rf.field_name = field->name;
+                rf.full_path = sym->type_name + "." + field->name;
+                rf.field_byte_offset = field->byte_offset;
+                rf.field_byte_size = field->byte_size;
+                rf.base_address = sym->address;
+                rf.resolved_address = address;
+                rf.field_type_name = field->type_name;
+                rf.is_bitfield = field->is_bitfield;
+                rf.bit_offset_within_field = field->is_bitfield
+                    ? (offset * 8 - field->bit_offset) : 0;
+                result.fields.push_back(rf);
+            }
         }
     }
 
@@ -1043,54 +1079,48 @@ std::vector<ResolvedStackFrame> AddressResolver::resolve_stack_trace(
 std::string AddressResolver::resolved_to_string(const ResolvedAddress &resolved) const
 {
     std::ostringstream oss;
-    oss << "Address: 0x" << std::hex << resolved.address << std::dec << "\n";
+    oss << "0x" << std::hex << resolved.address << std::dec;
 
+    const char *cls = "UNKNOWN";
     switch (resolved.addr_class) {
-    case ResolvedAddress::ADDR_GLOBAL:
-        oss << "Class:   GLOBAL\n";
-        break;
-    case ResolvedAddress::ADDR_STACK:
-        oss << "Class:   STACK\n";
-        break;
-    case ResolvedAddress::ADDR_HEAP:
-        oss << "Class:   HEAP\n";
-        break;
-    default:
-        oss << "Class:   UNKNOWN\n";
-        break;
+    case ResolvedAddress::ADDR_GLOBAL: cls = "GLOBAL"; break;
+    case ResolvedAddress::ADDR_STACK:  cls = "STACK";  break;
+    case ResolvedAddress::ADDR_HEAP:   cls = "HEAP";   break;
+    default: break;
     }
+    oss << "  " << cls;
 
     if (!resolved.symbol_name.empty())
-        oss << "Symbol:  " << resolved.symbol_name << "\n";
-    if (!resolved.type_name.empty())
-        oss << "Type:    " << resolved.type_name << "\n";
-    if (resolved.allocation_size)
-        oss << "Alloc:   " << resolved.allocation_size << " bytes\n";
-    if (resolved.pid)
-        oss << "PID:     " << resolved.pid << " TID: " << resolved.tid << "\n";
+        oss << "  " << resolved.symbol_name;
 
-    for (const auto &field : resolved.fields) {
-        oss << "Field:   " << field.full_path
-            << " (offset=" << field.field_byte_offset
-            << ", size=" << field.field_byte_size;
-        if (!field.field_type_name.empty())
-            oss << ", type=" << field.field_type_name;
-        if (field.is_bitfield)
-            oss << ", bit_offset=" << field.bit_offset_within_field;
-        oss << ")\n";
+    if (resolved.fields.empty()) {
+        if (!resolved.type_name.empty())
+            oss << "  " << resolved.type_name;
+    } else {
+        for (const auto &field : resolved.fields) {
+            oss << "\n  " << field.full_path
+                << "  +" << field.field_byte_offset
+                << "  " << field.field_byte_size << "B";
+            if (!field.field_type_name.empty())
+                oss << "  " << field.field_type_name;
+        }
     }
 
+    if (resolved.allocation_size)
+        oss << "\n  alloc=" << resolved.allocation_size << "B";
+    if (resolved.pid)
+        oss << "  pid=" << resolved.pid << " tid=" << resolved.tid;
+
     if (!resolved.stack_trace.empty()) {
-        oss << "Stack:\n";
+        oss << "\n  stack:";
         for (size_t i = 0; i < resolved.stack_trace.size(); i++) {
             const auto &frame = resolved.stack_trace[i];
-            oss << "  #" << i << " 0x" << std::hex << frame.pc << std::dec
+            oss << "\n    #" << i << " 0x" << std::hex << frame.pc << std::dec
                 << " " << frame.function_name;
             if (frame.offset_within_func)
                 oss << "+" << frame.offset_within_func;
             if (!frame.source_file.empty())
                 oss << " (" << frame.source_file << ":" << frame.source_line << ")";
-            oss << "\n";
         }
     }
 
