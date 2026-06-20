@@ -120,6 +120,9 @@ public:
     int64_t aslr_offset() const { return aslr_offset_; }
     const std::string &binary_path() const { return binary_path_; }
 
+    // 暴露给 cmd_lookup 使用
+    const AllocInfo *find_alloc_for_lookup(uint64_t addr) const { return find_alloc(addr); }
+
 private:
     void build_size_index();
     void detect_binary_ranges();

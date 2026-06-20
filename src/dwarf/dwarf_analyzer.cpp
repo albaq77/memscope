@@ -89,8 +89,11 @@ int DwarfAnalyzer::load_binary(const std::string &path)
               });
 
     symbol_addr_index_.clear();
-    for (size_t i = 0; i < symbols_.size(); i++)
+    symbol_name_index_.clear();
+    for (size_t i = 0; i < symbols_.size(); i++) {
         symbol_addr_index_[symbols_[i].address] = i;
+        symbol_name_index_[symbols_[i].name] = i;
+    }
 
     loaded_ = true;
     return rc;
@@ -162,8 +165,10 @@ int DwarfAnalyzer::parse_symbol_table()
                   return a.type_name.empty() && !b.type_name.empty();
               });
 
-    for (size_t i = 0; i < symbols_.size(); i++)
+    for (size_t i = 0; i < symbols_.size(); i++) {
         symbol_addr_index_[symbols_[i].address] = i;
+        symbol_name_index_[symbols_[i].name] = i;
+    }
 
     return 0;
 }

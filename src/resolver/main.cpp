@@ -11,6 +11,7 @@
 #include "../dwarf/dwarf_analyzer.h"
 #include "../resolver/address_resolver.h"
 #include "json_exporter.h"
+#include "json_writer.h"
 
 static void print_usage(const char *prog)
 {
@@ -122,49 +123,178 @@ static int cmd_lookup(memscope::AddressResolver &resolver, const std::string &cs
         resolver.set_alloc_table(allocs);
     }
 
-    printf("%-18s  %-6s  %-20s  %-30s  %s\n",
-           "ADDRESS", "REGION", "TYPE", "FIELD", "OFFSET");
-    printf("%-18s  %-6s  %-20s  %-30s  %s\n",
-           "------------------", "------", "--------------------", "------------------------------", "------");
+    const auto &analyzer = resolver.analyzer();
 
     for (uint64_t addr : addrs) {
         auto result = resolver.resolve(addr, 0);
+        memscope::JsonWriter w;
+        w.begin_object();
+
+        w.key("address"); w.value_string(memscope::JsonExporter::addr_hex(addr));
+
         if (!result) {
-            printf("0x%016lx  %-6s  %-20s  %-30s  %s\n",
-                   addr, "??????", "", "", "");
+            w.key("region"); w.value_string("UNKNOWN");
+            w.key("symbol_name"); w.value_null();
+            w.key("type_name"); w.value_null();
+            w.key("type_ref"); w.value_null();
+            w.key("var_path"); w.value_null();
+            w.key("type_path"); w.value_null();
+            w.key("byte_offset"); w.value_null();
+            w.key("byte_size"); w.value_null();
+            w.key("field_type_name"); w.value_null();
+            w.key("field_type_ref"); w.value_null();
+            w.key("is_pointer"); w.value_bool(false);
+            w.key("is_array"); w.value_bool(false);
+            w.key("is_bitfield"); w.value_bool(false);
+            w.key("base_address"); w.value_null();
+            w.key("allocation_size"); w.value_null();
+            w.key("allocation_callsite"); w.value_null();
+            w.end_object();
+            printf("%s\n", w.str().c_str());
             continue;
         }
 
         const char *cls = result->addr_class == memscope::ResolvedAddress::ADDR_GLOBAL ? "GLOBAL" :
                           result->addr_class == memscope::ResolvedAddress::ADDR_HEAP   ? "HEAP"   :
-                          result->addr_class == memscope::ResolvedAddress::ADDR_STACK  ? "STACK"  : "??????";
+                          result->addr_class == memscope::ResolvedAddress::ADDR_STACK  ? "STACK"  : "UNKNOWN";
+        w.key("region"); w.value_string(cls);
 
-        if (result->fields.empty()) {
-            printf("0x%016lx  %-6s  %-20s  %-30s  %s\n",
-                   addr, cls,
-                   result->type_name.empty() ? "" : result->type_name.c_str(),
-                   "", "");
+        // symbol_name: GLOBAL=变量名, STACK=函数名, HEAP=null
+        if (!result->symbol_name.empty()) {
+            w.key("symbol_name"); w.value_string(result->symbol_name);
         } else {
-            for (const auto &f : result->fields) {
-                char field_desc[256];
-                snprintf(field_desc, sizeof(field_desc), "%s.%s",
-                         f.type_name.c_str(), f.field_name.c_str());
+            w.key("symbol_name"); w.value_null();
+        }
 
-                char offset_desc[64];
-                if (f.field_byte_size > 0) {
-                    snprintf(offset_desc, sizeof(offset_desc), "+%lu [%luB %s]",
-                             f.field_byte_offset, f.field_byte_size,
-                             f.field_type_name.empty() ? "?" : f.field_type_name.c_str());
-                } else {
-                    snprintf(offset_desc, sizeof(offset_desc), "+%lu", f.field_byte_offset);
-                }
+        // type_name + type_ref
+        w.key("type_name");
+        if (!result->type_name.empty()) {
+            w.value_string(result->type_name);
+            const memscope::TypeInfo *ti = analyzer.find_type_by_name(result->type_name);
+            w.key("type_ref");
+            if (ti) w.value_string(memscope::JsonExporter::die_offset_hex(ti->die_offset));
+            else w.value_null();
+        } else {
+            w.value_null();
+            w.key("type_ref"); w.value_null();
+        }
 
-                printf("0x%016lx  %-6s  %-20s  %-30s  %s\n",
-                       addr, cls,
-                       result->type_name.empty() ? "" : result->type_name.c_str(),
-                       field_desc, offset_desc);
+        // 计算 offset 和 base_address
+        uint64_t offset = 0;
+        uint64_t base_addr = 0;
+        uint64_t type_die_off = 0;
+
+        if (result->addr_class == memscope::ResolvedAddress::ADDR_GLOBAL) {
+            const memscope::SymbolInfo *sym = analyzer.find_symbol_by_name(result->symbol_name);
+            if (sym) {
+                base_addr = sym->address;
+                offset = addr - sym->address;
+                type_die_off = sym->type_die_offset;
+            }
+        } else if (result->addr_class == memscope::ResolvedAddress::ADDR_HEAP) {
+            const memscope::AllocInfo *ainfo = resolver.find_alloc_for_lookup(addr);
+            if (ainfo) {
+                base_addr = ainfo->addr;
+                offset = addr - ainfo->addr;
+            }
+            if (!result->type_name.empty()) {
+                const memscope::TypeInfo *ti = analyzer.find_type_by_name(result->type_name);
+                if (ti) type_die_off = ti->die_offset;
+            }
+        } else if (result->addr_class == memscope::ResolvedAddress::ADDR_STACK) {
+            // STACK: use the first field's base_address if available
+            if (!result->fields.empty()) {
+                base_addr = result->fields[0].base_address;
+                offset = addr - base_addr;
             }
         }
+
+        // 递归字段路径解析
+        std::string var_path;
+        std::string type_path;
+        uint64_t field_byte_offset = offset;
+        uint64_t field_byte_size = 0;
+        std::string field_type_name;
+        std::string field_type_ref;
+        bool is_ptr = false;
+        bool is_arr = false;
+        bool is_bf = false;
+
+        if (type_die_off && offset < 0x1000000) {
+            auto rp = analyzer.resolve_field_path_recursive(type_die_off, offset);
+            if (rp) {
+                var_path = rp->var_path;
+                type_path = rp->type_path;
+                field_byte_offset = rp->byte_offset;
+                field_byte_size = rp->byte_size;
+                field_type_name = rp->field_type_name;
+                if (!field_type_name.empty()) {
+                    const memscope::TypeInfo *ft = analyzer.find_type_by_name(field_type_name);
+                    if (ft) field_type_ref = memscope::JsonExporter::die_offset_hex(ft->die_offset);
+                }
+            }
+        }
+
+        // 构造 var_path: 变量名前缀 + 递归路径
+        std::string full_var_path;
+        std::string full_type_path;
+        if (result->addr_class == memscope::ResolvedAddress::ADDR_GLOBAL) {
+            full_var_path = result->symbol_name;
+            if (!var_path.empty()) full_var_path += "." + var_path;
+            full_type_path = result->type_name;
+            if (!type_path.empty()) full_type_path += "." + type_path;
+        } else if (result->addr_class == memscope::ResolvedAddress::ADDR_HEAP) {
+            full_var_path = var_path;
+            full_type_path = type_path;
+        } else if (result->addr_class == memscope::ResolvedAddress::ADDR_STACK) {
+            // STACK: use first field name as variable name
+            if (!result->fields.empty()) {
+                full_var_path = result->fields[0].field_name;
+                if (!var_path.empty()) full_var_path += "." + var_path;
+            } else {
+                full_var_path = var_path;
+            }
+            full_type_path = result->type_name;
+            if (!type_path.empty()) full_type_path += "." + type_path;
+        }
+
+        w.key("var_path");
+        if (!full_var_path.empty()) w.value_string(full_var_path);
+        else w.value_null();
+
+        w.key("type_path");
+        if (!full_type_path.empty()) w.value_string(full_type_path);
+        else w.value_null();
+
+        w.key("byte_offset"); w.value_uint(field_byte_offset);
+        w.key("byte_size"); w.value_uint(field_byte_size);
+
+        w.key("field_type_name");
+        if (!field_type_name.empty()) w.value_string(field_type_name);
+        else w.value_null();
+
+        w.key("field_type_ref");
+        if (!field_type_ref.empty()) w.value_string(field_type_ref);
+        else w.value_null();
+
+        w.key("is_pointer"); w.value_bool(is_ptr);
+        w.key("is_array"); w.value_bool(is_arr);
+        w.key("is_bitfield"); w.value_bool(is_bf);
+
+        w.key("base_address");
+        if (base_addr) w.value_string(memscope::JsonExporter::addr_hex(base_addr));
+        else w.value_null();
+
+        w.key("allocation_size");
+        if (result->allocation_size) w.value_uint(result->allocation_size);
+        else w.value_null();
+
+        w.key("allocation_callsite");
+        if (!result->allocation_callsite.empty()) w.value_string(result->allocation_callsite);
+        else w.value_null();
+
+        w.end_object();
+        printf("%s\n", w.str().c_str());
     }
 
     return 0;
