@@ -111,6 +111,15 @@ public:
 
     const DwarfAnalyzer &analyzer() const { return analyzer_; }
 
+    // 暴露给 JsonExporter 使用
+    TypeInferenceResult infer_type_combined_v2_public(int64_t stack_id, uint64_t size,
+                                                       const std::vector<uint64_t> &inline_pcs = {}) const {
+        return infer_type_combined_v2(stack_id, size, inline_pcs);
+    }
+    const std::vector<BinaryRange> &binary_ranges() const { return binary_ranges_; }
+    int64_t aslr_offset() const { return aslr_offset_; }
+    const std::string &binary_path() const { return binary_path_; }
+
 private:
     void build_size_index();
     void detect_binary_ranges();

@@ -222,6 +222,8 @@ void DwarfAnalyzer::process_die(void *die_v, int depth)
     case DW_TAG_enumeration_type:
     case DW_TAG_typedef:
     case DW_TAG_base_type:
+    case DW_TAG_pointer_type:
+    case DW_TAG_array_type:
         process_type_die(die);
         break;
     case DW_TAG_subprogram:
@@ -247,13 +249,19 @@ void DwarfAnalyzer::process_type_die(void *die_v)
     Dwarf_Die *die = (Dwarf_Die *)die_v;
 
     const char *name = dwarf_diename(die);
-    if (!name)
+    int dwarf_tag_val = dwarf_tag(die);
+
+    // 匿名数组/指针类型允许 name 为空(用 die_offset 作 key)
+    bool allow_anonymous = (dwarf_tag_val == DW_TAG_array_type ||
+                            dwarf_tag_val == DW_TAG_pointer_type);
+    if (!name && !allow_anonymous)
         return;
 
     TypeInfo info = {};
     info.die_offset = dwarf_dieoffset(die);
-    info.name = name;
-    info.tag = map_tag(dwarf_tag(die));
+    if (name)
+        info.name = name;
+    info.tag = map_tag(dwarf_tag_val);
 
     Dwarf_Attribute attr;
     if (dwarf_attr(die, DW_AT_byte_size, &attr)) {
@@ -266,6 +274,71 @@ void DwarfAnalyzer::process_type_die(void *die_v)
         Dwarf_Word val;
         if (dwarf_formudata(&attr, &val) == 0)
             info.alignment = val;
+    }
+
+    // 数组类型:解析元素类型 + 元素数 + 元素大小
+    if (dwarf_tag_val == DW_TAG_array_type) {
+        Dwarf_Attribute elem_attr;
+        if (dwarf_attr(die, DW_AT_type, &elem_attr)) {
+            Dwarf_Die elem_die;
+            if (dwarf_formref_die(&elem_attr, &elem_die)) {
+                info.element_type_offset = dwarf_dieoffset(&elem_die);
+                const char *en = dwarf_diename(&elem_die);
+                if (en) info.element_type_name = en;
+                Dwarf_Word es = 0;
+                if (dwarf_aggregate_size(&elem_die, &es) == 0 && es > 0)
+                    info.element_byte_size = es;
+            }
+        }
+        // 遍历 subrange 获取 element_count
+        Dwarf_Die sub_child;
+        if (dwarf_child(die, &sub_child) == 0) {
+            do {
+                if (dwarf_tag(&sub_child) == DW_TAG_subrange_type) {
+                    Dwarf_Attribute ca;
+                    if (dwarf_attr(&sub_child, DW_AT_upper_bound, &ca)) {
+                        Dwarf_Word ub;
+                        if (dwarf_formudata(&ca, &ub) == 0) {
+                            info.element_count = ub + 1;
+                            break;
+                        }
+                    }
+                    if (dwarf_attr(&sub_child, DW_AT_count, &ca)) {
+                        Dwarf_Word cnt;
+                        if (dwarf_formudata(&ca, &cnt) == 0) {
+                            info.element_count = cnt;
+                            break;
+                        }
+                    }
+                }
+            } while (dwarf_siblingof(&sub_child, &sub_child) == 0);
+        }
+    }
+
+    // 指针类型:解析目标类型
+    if (dwarf_tag_val == DW_TAG_pointer_type) {
+        Dwarf_Attribute tgt_attr;
+        if (dwarf_attr(die, DW_AT_type, &tgt_attr)) {
+            Dwarf_Die tgt_die;
+            if (dwarf_formref_die(&tgt_attr, &tgt_die)) {
+                info.pointer_target_type_offset = dwarf_dieoffset(&tgt_die);
+                const char *tn = dwarf_diename(&tgt_die);
+                if (tn) info.pointer_target_type_name = tn;
+            }
+        }
+    }
+
+    // typedef:解析底层类型
+    if (dwarf_tag_val == DW_TAG_typedef) {
+        Dwarf_Attribute ut_attr;
+        if (dwarf_attr(die, DW_AT_type, &ut_attr)) {
+            Dwarf_Die ut_die;
+            if (dwarf_formref_die(&ut_attr, &ut_die)) {
+                info.underlying_type_offset = dwarf_dieoffset(&ut_die);
+                const char *un = dwarf_diename(&ut_die);
+                if (un) info.underlying_type_name = un;
+            }
+        }
     }
 
     Dwarf_Die child;
@@ -297,7 +370,8 @@ void DwarfAnalyzer::process_type_die(void *die_v)
 
     size_t idx = types_.size();
     types_.push_back(info);
-    type_name_index_[info.name] = idx;
+    if (!info.name.empty())
+        type_name_index_[info.name] = idx;
     type_offset_index_[info.die_offset] = idx;
 }
 
@@ -348,6 +422,7 @@ void DwarfAnalyzer::process_member_die(void *die_v, TypeInfo &parent)
     if (dwarf_attr(die, DW_AT_type, &type_attr)) {
         Dwarf_Die type_die;
         if (dwarf_formref_die(&type_attr, &type_die)) {
+            field.type_die_offset = dwarf_dieoffset(&type_die);
             const char *type_name = dwarf_diename(&type_die);
             if (type_name)
                 field.type_name = type_name;
@@ -355,6 +430,58 @@ void DwarfAnalyzer::process_member_die(void *die_v, TypeInfo &parent)
             int type_tag = dwarf_tag(&type_die);
             field.is_pointer = (type_tag == DW_TAG_pointer_type);
             field.is_array = (type_tag == DW_TAG_array_type);
+
+            // 数组字段:解析元素类型 + 元素数 + 元素大小
+            if (field.is_array) {
+                Dwarf_Attribute elem_attr;
+                if (dwarf_attr(&type_die, DW_AT_type, &elem_attr)) {
+                    Dwarf_Die elem_die;
+                    if (dwarf_formref_die(&elem_attr, &elem_die)) {
+                        field.array_element_type_offset = dwarf_dieoffset(&elem_die);
+                        const char *en = dwarf_diename(&elem_die);
+                        if (en) field.array_element_type_name = en;
+                        Dwarf_Word es = 0;
+                        if (dwarf_aggregate_size(&elem_die, &es) == 0 && es > 0)
+                            field.array_element_byte_size = es;
+                    }
+                }
+                // 解析 subrange 获取 element_count
+                Dwarf_Die sub_child;
+                if (dwarf_child(&type_die, &sub_child) == 0) {
+                    do {
+                        if (dwarf_tag(&sub_child) == DW_TAG_subrange_type) {
+                            Dwarf_Attribute ca;
+                            if (dwarf_attr(&sub_child, DW_AT_upper_bound, &ca)) {
+                                Dwarf_Word ub;
+                                if (dwarf_formudata(&ca, &ub) == 0) {
+                                    field.array_element_count = ub + 1;
+                                    break;
+                                }
+                            }
+                            if (dwarf_attr(&sub_child, DW_AT_count, &ca)) {
+                                Dwarf_Word cnt;
+                                if (dwarf_formudata(&ca, &cnt) == 0) {
+                                    field.array_element_count = cnt;
+                                    break;
+                                }
+                            }
+                        }
+                    } while (dwarf_siblingof(&sub_child, &sub_child) == 0);
+                }
+            }
+
+            // 指针字段:解析目标类型
+            if (field.is_pointer) {
+                Dwarf_Attribute tgt_attr;
+                if (dwarf_attr(&type_die, DW_AT_type, &tgt_attr)) {
+                    Dwarf_Die tgt_die;
+                    if (dwarf_formref_die(&tgt_attr, &tgt_die)) {
+                        field.pointer_target_type_offset = dwarf_dieoffset(&tgt_die);
+                        const char *tn = dwarf_diename(&tgt_die);
+                        if (tn) field.pointer_target_type_name = tn;
+                    }
+                }
+            }
 
             if (field.byte_size == 0) {
                 Dwarf_Word type_size = 0;
@@ -853,6 +980,108 @@ std::optional<FieldInfo> DwarfAnalyzer::resolve_field_at_offset(
     return std::nullopt;
 }
 
+std::optional<DwarfAnalyzer::ResolvedFieldPath> DwarfAnalyzer::resolve_field_path_recursive(
+    uint64_t type_die_offset, uint64_t byte_offset, int depth) const
+{
+    if (depth > 16)
+        return std::nullopt;
+
+    const TypeInfo *type = find_type_by_offset(type_die_offset);
+    if (!type)
+        return std::nullopt;
+
+    ResolvedFieldPath rp = {};
+    rp.byte_offset = byte_offset;
+    rp.byte_size = type->byte_size;
+    rp.field_type_name = type->name;
+
+    // typedef 穿透
+    if (type->tag == TypeInfo::TAG_TYPEDEF && type->underlying_type_offset) {
+        auto inner = resolve_field_path_recursive(type->underlying_type_offset, byte_offset, depth + 1);
+        if (inner) {
+            rp.var_path = inner->var_path;
+            rp.type_path = type->name;
+            if (!inner->type_path.empty())
+                rp.type_path += "." + inner->type_path;
+            rp.byte_size = inner->byte_size;
+            rp.field_type_name = inner->field_type_name;
+            return rp;
+        }
+        rp.type_path = type->name;
+        return rp;
+    }
+
+    // 数组:计算 elem_index + elem_offset
+    if (type->tag == TypeInfo::TAG_ARRAY && type->element_byte_size > 0) {
+        uint64_t idx = byte_offset / type->element_byte_size;
+        uint64_t sub = byte_offset % type->element_byte_size;
+        rp.var_path = "[" + std::to_string(idx) + "]";
+        rp.type_path = type->name + "[" + std::to_string(idx) + "]";
+        rp.byte_size = type->element_byte_size;
+        rp.field_type_name = type->element_type_name;
+        if (sub > 0 && type->element_type_offset) {
+            auto inner = resolve_field_path_recursive(type->element_type_offset, sub, depth + 1);
+            if (inner) {
+                rp.var_path += "." + inner->var_path;
+                rp.type_path += "." + inner->type_path;
+                rp.byte_size = inner->byte_size;
+                rp.field_type_name = inner->field_type_name;
+            }
+        }
+        return rp;
+    }
+
+    // struct/union:找最匹配字段并递归
+    if (type->tag == TypeInfo::TAG_STRUCT || type->tag == TypeInfo::TAG_UNION) {
+        const FieldInfo *best = nullptr;
+        uint64_t best_distance = UINT64_MAX;
+        for (const auto &f : type->fields) {
+            if (byte_offset == f.byte_offset) {
+                if (!best || f.byte_size > best->byte_size) {
+                    best = &f;
+                    best_distance = 0;
+                }
+            }
+            if (f.byte_size > 0 &&
+                byte_offset >= f.byte_offset &&
+                byte_offset < f.byte_offset + f.byte_size) {
+                uint64_t dist = byte_offset - f.byte_offset;
+                if (dist < best_distance) {
+                    best_distance = dist;
+                    best = &f;
+                }
+            }
+        }
+        if (!best) {
+            rp.type_path = type->name;
+            return rp;
+        }
+        rp.var_path = best->name;
+        rp.type_path = type->name + "." + best->name;
+        rp.byte_offset = best->byte_offset;
+        rp.byte_size = best->byte_size;
+        rp.field_type_name = best->type_name;
+        // 递归嵌套结构体
+        uint64_t sub = byte_offset - best->byte_offset;
+        if (sub > 0 && best->type_die_offset) {
+            auto inner = resolve_field_path_recursive(best->type_die_offset, sub, depth + 1);
+            if (inner) {
+                if (!inner->var_path.empty())
+                    rp.var_path += "." + inner->var_path;
+                if (!inner->type_path.empty())
+                    rp.type_path += "." + inner->type_path;
+                rp.byte_size = inner->byte_size;
+                rp.field_type_name = inner->field_type_name;
+            }
+        }
+        return rp;
+    }
+
+    // 标量/指针/base_type
+    rp.type_path = type->name;
+    return rp;
+}
+
 std::string DwarfAnalyzer::type_layout_to_string(const std::string &type_name) const
 {
     const TypeInfo *type = find_type_by_name(type_name);
@@ -1008,9 +1237,26 @@ std::vector<StackVariableInfo> DwarfAnalyzer::find_stack_variables(uint64_t pc) 
         if (dwarf_attr(&child, DW_AT_type, &type_attr)) {
             Dwarf_Die type_die;
             if (dwarf_formref_die(&type_attr, &type_die)) {
+                var_info.type_die_offset = dwarf_dieoffset(&type_die);
                 const char *type_name = dwarf_diename(&type_die);
                 if (type_name)
                     var_info.type_name = type_name;
+
+                int type_tag = dwarf_tag(&type_die);
+                var_info.is_pointer = (type_tag == DW_TAG_pointer_type);
+
+                // 指针:解析目标类型
+                if (var_info.is_pointer) {
+                    Dwarf_Attribute tgt_attr;
+                    if (dwarf_attr(&type_die, DW_AT_type, &tgt_attr)) {
+                        Dwarf_Die tgt_die;
+                        if (dwarf_formref_die(&tgt_attr, &tgt_die)) {
+                            var_info.pointer_target_type_offset = dwarf_dieoffset(&tgt_die);
+                            const char *tn = dwarf_diename(&tgt_die);
+                            if (tn) var_info.pointer_target_type_name = tn;
+                        }
+                    }
+                }
 
                 Dwarf_Word type_size = 0;
                 if (dwarf_aggregate_size(&type_die, &type_size) == 0 && type_size > 0)

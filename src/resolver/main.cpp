@@ -10,6 +10,7 @@
 
 #include "../dwarf/dwarf_analyzer.h"
 #include "../resolver/address_resolver.h"
+#include "json_exporter.h"
 
 static void print_usage(const char *prog)
 {
@@ -18,7 +19,8 @@ static void print_usage(const char *prog)
         "\n"
         "Usage:\n"
         "  %s lookup  -b <binary> -f <csv> -a <addr> [-a <addr> ...]\n"
-        "  %s batch   -b <binary> -f <csv> [-o <output>]\n"
+        "  %s json    -b <binary> -f <csv> [-o <output.json>]\n"
+        "  %s batch   -b <binary> -f <csv> [-o <output>]  (deprecated)\n"
         "  %s resolve -b <binary> -a <addr> [-p <pid>] [-f <csv>]\n"
         "  %s layout  -b <binary> -t <type>\n"
         "  %s types   -b <binary> [-n <name>]\n"
@@ -26,7 +28,9 @@ static void print_usage(const char *prog)
         "\n"
         "Commands:\n"
         "  lookup    Lookup addresses: auto-classify region + resolve field\n"
-        "  batch     Batch resolve all addresses in CSV\n"
+        "  json      Export JSON dictionary (types + globals + locals + allocs)\n"
+        "            Recommended: downstream tools query this dict for address->path\n"
+        "  batch     Batch resolve all addresses in CSV (deprecated, use json)\n"
         "  resolve   Resolve single address (verbose)\n"
         "  layout    Print struct layout\n"
         "  types     List/search types\n"
@@ -38,10 +42,10 @@ static void print_usage(const char *prog)
         "  -t <type>   Type name\n"
         "  -p <pid>    Process PID\n"
         "  -f <csv>    Allocation CSV from collector\n"
-        "  -o <file>   Output file for batch results\n"
+        "  -o <file>   Output file for batch/json results\n"
         "  -n <name>   Search filter\n"
         "  -h          Show this help\n",
-        prog, prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog, prog);
 }
 
 static uint64_t parse_addr(const char *s)
@@ -261,6 +265,35 @@ static int cmd_batch(memscope::AddressResolver &resolver, const std::string &csv
     return 0;
 }
 
+static int cmd_json(memscope::AddressResolver &resolver, const std::string &csv_path,
+                     const std::string &output_path)
+{
+    auto allocs = load_csv(csv_path);
+    resolver.set_alloc_table(allocs);
+
+    memscope::JsonExporter exporter(resolver, allocs);
+    std::string json = exporter.build_json();
+
+    FILE *out = stdout;
+    if (!output_path.empty()) {
+        out = fopen(output_path.c_str(), "w");
+        if (!out) {
+            fprintf(stderr, "cannot open output: %s\n", output_path.c_str());
+            return 1;
+        }
+    }
+    fputs(json.c_str(), out);
+    fputc('\n', out);
+    if (out != stdout)
+        fclose(out);
+
+    fprintf(stderr, "\nJSON export: %zu allocs, %zu types, %zu symbols\n",
+            allocs.size(),
+            resolver.analyzer().get_all_types().size(),
+            resolver.analyzer().get_all_symbols().size());
+    return 0;
+}
+
 static int cmd_resolve(memscope::AddressResolver &resolver, uint64_t addr,
                         uint32_t pid, const std::string &csv_path)
 {
@@ -398,6 +431,14 @@ int main(int argc, char **argv)
         memscope::AddressResolver resolver;
         resolver.load_binary(binary_path);
         return cmd_batch(resolver, csv_path, output_path);
+    } else if (cmd == "json") {
+        if (csv_path.empty()) {
+            fprintf(stderr, "json requires -f <csv>\n");
+            return 1;
+        }
+        memscope::AddressResolver resolver;
+        resolver.load_binary(binary_path);
+        return cmd_json(resolver, csv_path, output_path);
     } else if (cmd == "resolve") {
         if (addrs.empty()) {
             fprintf(stderr, "resolve requires -a <addr>\n");

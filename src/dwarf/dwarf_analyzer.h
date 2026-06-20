@@ -142,6 +142,13 @@ struct FieldInfo {
     bool        is_array;
     uint64_t    array_element_count;
     std::string full_qualified_name;
+    // 扩展:用于递归字段路径解析
+    uint64_t    type_die_offset;            // 字段类型的 DIE offset
+    std::string array_element_type_name;    // 数组元素类型名
+    uint64_t    array_element_type_offset;  // 数组元素类型 DIE offset
+    uint64_t    array_element_byte_size;    // 数组元素字节大小
+    uint64_t    pointer_target_type_offset; // 指针目标类型 DIE offset
+    std::string pointer_target_type_name;   // 指针目标类型名
 };
 
 struct TypeInfo {
@@ -164,6 +171,15 @@ struct TypeInfo {
     std::vector<FieldInfo> fields;
     std::string            source_file;
     uint32_t               source_line;
+    // 扩展:数组/指针/typedef 元数据
+    uint64_t              element_type_offset;        // TAG_ARRAY: 元素类型 DIE offset
+    std::string           element_type_name;          // TAG_ARRAY: 元素类型名
+    uint64_t              element_count;              // TAG_ARRAY: 元素数
+    uint64_t              element_byte_size;          // TAG_ARRAY: 元素字节大小
+    uint64_t              pointer_target_type_offset; // TAG_POINTER: 目标类型 DIE offset
+    std::string           pointer_target_type_name;   // TAG_POINTER: 目标类型名
+    uint64_t              underlying_type_offset;     // TAG_TYPEDEF: 底层类型 DIE offset
+    std::string           underlying_type_name;       // TAG_TYPEDEF: 底层类型名
 };
 
 struct SymbolInfo {
@@ -240,6 +256,11 @@ struct StackVariableInfo {
     std::string type_name;
     int64_t     stack_offset;
     uint64_t    byte_size;
+    // 扩展:指针信息
+    uint64_t    type_die_offset;
+    bool        is_pointer;
+    uint64_t    pointer_target_type_offset;
+    std::string pointer_target_type_name;
 };
 
 class DwarfAnalyzer {
@@ -274,6 +295,17 @@ public:
                                                       uint64_t byte_offset) const;
     std::optional<FieldInfo> resolve_field_at_offset(uint64_t type_die_offset,
                                                       uint64_t byte_offset) const;
+
+    // 递归字段路径解析:返回 变量名路径 + 类型名路径(供 JSON 查询参考实现)
+    struct ResolvedFieldPath {
+        std::string var_path;       // "kmeans_data.points"
+        std::string type_path;      // "kmeans_data_t.points"
+        uint64_t    byte_offset;
+        uint64_t    byte_size;
+        std::string field_type_name;
+    };
+    std::optional<ResolvedFieldPath> resolve_field_path_recursive(
+        uint64_t type_die_offset, uint64_t byte_offset, int depth = 0) const;
 
     std::optional<std::pair<std::string, uint32_t>> resolve_source_line(uint64_t pc) const;
 
