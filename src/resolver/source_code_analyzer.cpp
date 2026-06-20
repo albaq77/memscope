@@ -69,6 +69,45 @@ std::optional<std::string> SourceCodeAnalyzer::get_source_line(const std::string
     return std::nullopt;
 }
 
+static std::string try_resolve_source_path(const std::string &file)
+{
+    if (file.empty() || file == "??")
+        return "";
+
+    std::ifstream direct(file);
+    if (direct.is_open())
+        return file;
+
+    std::string basename = file;
+    size_t slash = basename.find_last_of('/');
+    if (slash != std::string::npos)
+        basename = basename.substr(slash + 1);
+
+    const char *search_dirs_env = std::getenv("MEMSCOPE_SOURCE_PATH");
+    std::vector<std::string> search_dirs;
+    if (search_dirs_env && search_dirs_env[0]) {
+        std::istringstream iss(search_dirs_env);
+        std::string dir;
+        while (std::getline(iss, dir, ':')) {
+            if (!dir.empty())
+                search_dirs.push_back(dir);
+        }
+    }
+
+    search_dirs.push_back(".");
+    search_dirs.push_back("tests");
+    search_dirs.push_back("tests/kmeans");
+
+    for (const auto &dir : search_dirs) {
+        std::string candidate = dir + "/" + basename;
+        std::ifstream test(candidate);
+        if (test.is_open())
+            return candidate;
+    }
+
+    return "";
+}
+
 TypeExtractionResult SourceCodeAnalyzer::extract_type_from_source(uint64_t pc) const
 {
     TypeExtractionResult result = {};
@@ -78,7 +117,11 @@ TypeExtractionResult SourceCodeAnalyzer::extract_type_from_source(uint64_t pc) c
     if (!location)
         return result;
 
-    auto source_line = get_source_line(location->first, location->second);
+    std::string resolved = try_resolve_source_path(location->first);
+    if (resolved.empty())
+        return result;
+
+    auto source_line = get_source_line(resolved, location->second);
     if (!source_line)
         return result;
 
@@ -172,6 +215,7 @@ std::vector<std::string> SourceCodeAnalyzer::extract_malloc_types(const std::str
     std::regex patterns[] = {
         std::regex(R"(=\s*\(\s*([^*\s]+)\s*\*\s*\)\s*malloc\s*\()"),
         std::regex(R"(=\s*\(\s*struct\s+([^*\s]+)\s*\*\s*\)\s*malloc\s*\()"),
+        std::regex(R"(=\s*\(\s*([^*\s]+)\s*\*\s*\*\s*\)\s*malloc\s*\()"),
         std::regex(R"(([^*\s]+)\s*\*\s+(\w+)\s*=\s*malloc\s*\()"),
         std::regex(R"(struct\s+([^*\s]+)\s*\*\s+(\w+)\s*=\s*malloc\s*\()"),
         std::regex(R"(malloc\s*\(\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
@@ -180,6 +224,9 @@ std::vector<std::string> SourceCodeAnalyzer::extract_malloc_types(const std::str
         std::regex(R"(malloc\s*\([^)]*\*\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
         std::regex(R"(malloc\s*\(\s*\([^)]+\)\s*\*\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
         std::regex(R"(malloc\s*\(\s*\([^)]+\)\s*\*\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
+        std::regex(R"(malloc\s*\(\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\*[^)]*\))"),
+        std::regex(R"(malloc\s*\(\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\*[^)]*\))"),
+        std::regex(R"(malloc\s*\(\s*\([^)]+\)\s*\*\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\*[^)]*\))"),
     };
 
     for (const auto &pattern : patterns) {
@@ -209,10 +256,13 @@ std::vector<std::string> SourceCodeAnalyzer::extract_calloc_types(const std::str
     std::regex patterns[] = {
         std::regex(R"(=\s*\(\s*([^*\s]+)\s*\*\s*\)\s*calloc\s*\()"),
         std::regex(R"(=\s*\(\s*struct\s+([^*\s]+)\s*\*\s*\)\s*calloc\s*\()"),
+        std::regex(R"(=\s*\(\s*([^*\s]+)\s*\*\s*\*\s*\)\s*calloc\s*\()"),
         std::regex(R"(([^*\s]+)\s*\*\s+(\w+)\s*=\s*calloc\s*\()"),
         std::regex(R"(struct\s+([^*\s]+)\s*\*\s+(\w+)\s*=\s*calloc\s*\()"),
         std::regex(R"(calloc\s*\([^,]+,\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
         std::regex(R"(calloc\s*\([^,]+,\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
+        std::regex(R"(calloc\s*\(\s*sizeof\s*\(\s*([^)]+)\s*\)\s*,[^)]*\))"),
+        std::regex(R"(calloc\s*\(\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*,[^)]*\))"),
     };
 
     for (const auto &pattern : patterns) {
@@ -242,10 +292,13 @@ std::vector<std::string> SourceCodeAnalyzer::extract_realloc_types(const std::st
     std::regex patterns[] = {
         std::regex(R"(=\s*\(\s*([^*\s]+)\s*\*\s*\)\s*realloc\s*\()"),
         std::regex(R"(=\s*\(\s*struct\s+([^*\s]+)\s*\*\s*\)\s*realloc\s*\()"),
+        std::regex(R"(=\s*\(\s*([^*\s]+)\s*\*\s*\*\s*\)\s*realloc\s*\()"),
         std::regex(R"(([^*\s]+)\s*\*\s+(\w+)\s*=\s*realloc\s*\()"),
         std::regex(R"(struct\s+([^*\s]+)\s*\*\s+(\w+)\s*=\s*realloc\s*\()"),
         std::regex(R"(realloc\s*\([^,]+,\s*[^)]*sizeof\s*\(\s*([^)]+)\s*\)\s*\))"),
         std::regex(R"(realloc\s*\([^,]+,\s*[^)]*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\))"),
+        std::regex(R"(realloc\s*\([^,]+,\s*sizeof\s*\(\s*([^)]+)\s*\)\s*\*[^)]*\))"),
+        std::regex(R"(realloc\s*\([^,]+,\s*sizeof\s*\(\s*struct\s+([^)]+)\s*\)\s*\*[^)]*\))"),
     };
 
     for (const auto &pattern : patterns) {

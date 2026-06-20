@@ -56,6 +56,22 @@ void AddressResolver::build_size_index()
             size_index_[types[i].byte_size].push_back(i);
         }
     }
+    for (size_t i = 0; i < types.size(); i++) {
+        if (types[i].byte_size > 0 && types[i].fields.empty() &&
+            (types[i].tag == TypeInfo::TAG_BASE_TYPE ||
+             types[i].tag == TypeInfo::TAG_TYPEDEF)) {
+            auto &vec = size_index_[types[i].byte_size];
+            bool found = false;
+            for (size_t idx : vec) {
+                if (types[idx].name == types[i].name) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                vec.push_back(i);
+        }
+    }
 }
 
 void AddressResolver::set_alloc_table(const std::vector<AllocInfo> &allocs)
@@ -105,7 +121,7 @@ const AllocInfo *AddressResolver::find_alloc(uint64_t addr) const
         }
     }
     
-    return nullptr;
+    return best_match;
 }
 
 std::vector<std::string> AddressResolver::resolve_stack_function_names(int64_t stack_id) const
@@ -352,9 +368,16 @@ int64_t AddressResolver::compute_aslr_offset(const std::vector<uint64_t> &runtim
             
             if (potential_offset < 0x1000000LL || potential_offset > 0x1000000000000LL)
                 continue;
-            
-            int64_t rounded_offset = (potential_offset / 0x1000) * 0x1000;
-            offset_counts[rounded_offset]++;
+
+            if (potential_offset % 0x1000 == 0) {
+                offset_counts[potential_offset]++;
+            } else {
+                int64_t page_offset = runtime_pc & 0xFFF;
+                int64_t compile_page_offset = compile_start & 0xFFF;
+                if (page_offset == compile_page_offset) {
+                    offset_counts[potential_offset]++;
+                }
+            }
         }
     }
     
@@ -369,6 +392,45 @@ int64_t AddressResolver::compute_aslr_offset(const std::vector<uint64_t> &runtim
         }
         
         debug_log("[DEBUG] ASLR offset computed: %ld (count=%d)\n",
+                  best_offset, best_count);
+        const_cast<int64_t&>(aslr_offset_) = best_offset;
+        return best_offset;
+    }
+
+    std::map<int64_t, int> page_offset_counts;
+    for (uint64_t runtime_pc : runtime_pcs) {
+        if (runtime_pc == 0 || runtime_pc >= 0x7f0000000000ULL)
+            continue;
+        
+        for (const auto &sp : subprogs) {
+            if (sp.low_pc == 0 || sp.name.empty())
+                continue;
+
+            uint64_t compile_start = sp.low_pc;
+            uint64_t compile_end = sp.high_pc_is_offset ? sp.low_pc + sp.high_pc : sp.high_pc;
+            if (compile_end <= compile_start)
+                continue;
+
+            int64_t potential_offset = (int64_t)runtime_pc - (int64_t)compile_start;
+            if (potential_offset < 0x1000000LL || potential_offset > 0x1000000000000LL)
+                continue;
+
+            int64_t rounded_offset = (potential_offset / 0x1000) * 0x1000;
+            page_offset_counts[rounded_offset]++;
+        }
+    }
+
+    if (!page_offset_counts.empty()) {
+        int64_t best_offset = 0;
+        int best_count = 0;
+        for (const auto &p : page_offset_counts) {
+            if (p.second > best_count) {
+                best_count = p.second;
+                best_offset = p.first;
+            }
+        }
+        
+        debug_log("[DEBUG] ASLR offset (page-aligned fallback): %ld (count=%d)\n",
                   best_offset, best_count);
         const_cast<int64_t&>(aslr_offset_) = best_offset;
         return best_offset;
@@ -434,11 +496,22 @@ uint64_t AddressResolver::va_to_file_offset(uint64_t va) const
     if (va >= 0x7f0000000000ULL) {
         return va;
     }
+
+    if (aslr_offset_ != 0) {
+        uint64_t candidate = va - aslr_offset_;
+        for (const auto &range : binary_ranges_) {
+            if (candidate >= range.start && candidate < range.end) {
+                debug_log("[DEBUG] va_to_file_offset: va=0x%lx aslr=%ld -> compile=0x%lx (in range 0x%lx-0x%lx)\n",
+                          va, aslr_offset_, candidate, range.start, range.end);
+                return candidate;
+            }
+        }
+    }
     
     uint64_t va_page_offset = va & 0xFFF;
     
-    debug_log("[DEBUG] va_to_file_offset: va=0x%lx page_offset=0x%lx ranges=%zu\n",
-              va, va_page_offset, binary_ranges_.size());
+    debug_log("[DEBUG] va_to_file_offset: va=0x%lx page_offset=0x%lx ranges=%zu (aslr=%ld, fallback to page scan)\n",
+              va, va_page_offset, binary_ranges_.size(), aslr_offset_);
     
     for (const auto &range : binary_ranges_) {
         debug_log("[DEBUG]   range: 0x%lx - 0x%lx\n", range.start, range.end);
@@ -511,6 +584,88 @@ TypeInferenceResult AddressResolver::try_array_size_match(uint64_t size) const
     return result;
 }
 
+TypeInferenceResult AddressResolver::try_scalar_array_match(uint64_t size) const
+{
+    TypeInferenceResult result = {};
+    const auto &types = analyzer_.get_all_types();
+
+    static const std::unordered_map<std::string, uint64_t> builtin_sizes = {
+        {"char", 1}, {"signed char", 1}, {"unsigned char", 1},
+        {"short", 2}, {"short int", 2}, {"unsigned short", 2},
+        {"int", 4}, {"signed int", 4}, {"unsigned int", 4},
+        {"long", 8}, {"long int", 8}, {"unsigned long", 8},
+        {"long long", 8}, {"long long int", 8}, {"unsigned long long", 8},
+        {"float", 4}, {"double", 8}, {"long double", 16},
+    };
+
+    std::vector<std::pair<std::string, uint64_t>> candidates;
+
+    for (const auto &type : types) {
+        if (type.tag != TypeInfo::TAG_BASE_TYPE)
+            continue;
+        if (type.byte_size == 0)
+            continue;
+        if (size % type.byte_size != 0)
+            continue;
+
+        uint64_t count = size / type.byte_size;
+        if (count < 1 || count > 10000000)
+            continue;
+
+        candidates.push_back({type.name, type.byte_size});
+    }
+
+    for (const auto &kv : builtin_sizes) {
+        if (size % kv.second != 0)
+            continue;
+        uint64_t count = size / kv.second;
+        if (count < 1 || count > 10000000)
+            continue;
+
+        bool found = false;
+        for (const auto &c : candidates) {
+            if (c.first == kv.first) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            candidates.push_back({kv.first, kv.second});
+    }
+
+    for (const auto &type : types) {
+        if (type.tag != TypeInfo::TAG_POINTER)
+            continue;
+        if (type.byte_size == 0)
+            continue;
+        if (size % type.byte_size != 0)
+            continue;
+
+        uint64_t count = size / type.byte_size;
+        if (count < 1 || count > 10000000)
+            continue;
+
+        candidates.push_back({type.name, type.byte_size});
+    }
+
+    if (candidates.empty())
+        return result;
+
+    std::sort(candidates.begin(), candidates.end(),
+              [](const std::pair<std::string, uint64_t> &a,
+                 const std::pair<std::string, uint64_t> &b) {
+                  return a.second > b.second;
+              });
+
+    result.type_name = candidates[0].first;
+    result.alloc_count = size / candidates[0].second;
+    result.method = "scalar_array_match";
+    result.confidence = 0.30f;
+    result.note = "scalar array (" + std::to_string(result.alloc_count) + " elements)";
+
+    return result;
+}
+
 TypeInferenceResult AddressResolver::infer_type_from_source_text(uint64_t pc) const
 {
     TypeInferenceResult result = {};
@@ -558,9 +713,9 @@ TypeInferenceResult AddressResolver::infer_type_combined_v2(
     }
 
     if (!pcs.empty()) {
-        const_cast<int64_t&>(aslr_offset_) = 0;
-        
-        compute_aslr_offset(pcs);
+        if (aslr_offset_ == 0) {
+            compute_aslr_offset(pcs);
+        }
         debug_log("[DEBUG]   ASLR offset: %ld\n", aslr_offset_);
 
         for (size_t i = 1; i < pcs.size(); i++) {
@@ -587,6 +742,23 @@ TypeInferenceResult AddressResolver::infer_type_combined_v2(
                     if (source_result.alloc_count > 1)
                         source_result.note = "array allocation (" +
                                       std::to_string(source_result.alloc_count) + " elements)";
+                } else {
+                    static const std::unordered_map<std::string, uint64_t> builtin_sizes = {
+                        {"char", 1}, {"signed char", 1}, {"unsigned char", 1},
+                        {"short", 2}, {"short int", 2}, {"unsigned short", 2},
+                        {"int", 4}, {"signed int", 4}, {"unsigned int", 4},
+                        {"long", 8}, {"long int", 8}, {"unsigned long", 8},
+                        {"long long", 8}, {"long long int", 8}, {"unsigned long long", 8},
+                        {"float", 4}, {"double", 8}, {"long double", 16},
+                    };
+                    auto bit = builtin_sizes.find(source_result.type_name);
+                    if (bit != builtin_sizes.end() && bit->second > 0 &&
+                        size % bit->second == 0) {
+                        source_result.alloc_count = size / bit->second;
+                        if (source_result.alloc_count > 1)
+                            source_result.note = "scalar array (" +
+                                          std::to_string(source_result.alloc_count) + " elements)";
+                    }
                 }
                 
                 return source_result;
@@ -743,6 +915,10 @@ TypeInferenceResult AddressResolver::infer_type_combined_v2(
     if (!array_result.type_name.empty())
         return array_result;
 
+    auto scalar_result = try_scalar_array_match(size);
+    if (!scalar_result.type_name.empty())
+        return scalar_result;
+
     result.method = "unknown";
     result.confidence = 0.0f;
     return result;
@@ -886,8 +1062,24 @@ std::optional<ResolvedAddress> AddressResolver::resolve_heap(uint64_t address,
     if (!type_result.type_name.empty()) {
         const TypeInfo *ti = analyzer_.find_type_by_name(type_result.type_name);
 
-        if (type_result.alloc_count > 1 && ti && ti->byte_size > 0) {
-            uint64_t elem_size = ti->byte_size;
+        uint64_t elem_size = 0;
+        if (ti && ti->byte_size > 0) {
+            elem_size = ti->byte_size;
+        } else {
+            static const std::unordered_map<std::string, uint64_t> builtin_sizes = {
+                {"char", 1}, {"signed char", 1}, {"unsigned char", 1},
+                {"short", 2}, {"short int", 2}, {"unsigned short", 2},
+                {"int", 4}, {"signed int", 4}, {"unsigned int", 4},
+                {"long", 8}, {"long int", 8}, {"unsigned long", 8},
+                {"long long", 8}, {"long long int", 8}, {"unsigned long long", 8},
+                {"float", 4}, {"double", 8}, {"long double", 16},
+            };
+            auto bit = builtin_sizes.find(type_result.type_name);
+            if (bit != builtin_sizes.end())
+                elem_size = bit->second;
+        }
+
+        if (type_result.alloc_count > 1 && elem_size > 0) {
             uint64_t elem_index = offset / elem_size;
             uint64_t elem_offset = offset % elem_size;
 
@@ -905,6 +1097,19 @@ std::optional<ResolvedAddress> AddressResolver::resolve_heap(uint64_t address,
                 rf.field_type_name = field->type_name;
                 rf.is_bitfield = field->is_bitfield;
                 result.fields.push_back(rf);
+            } else {
+                ResolvedField rf = {};
+                rf.type_name = type_result.type_name;
+                rf.field_name = "[" + std::to_string(elem_index) + "]";
+                rf.full_path = type_result.type_name + "[" +
+                               std::to_string(elem_index) + "]";
+                rf.field_byte_offset = offset;
+                rf.field_byte_size = elem_size;
+                rf.base_address = alloc->addr;
+                rf.resolved_address = address;
+                rf.field_type_name = type_result.type_name;
+                rf.is_bitfield = false;
+                result.fields.push_back(rf);
             }
         } else {
             auto field = analyzer_.resolve_field_at_offset(type_result.type_name, offset);
@@ -921,6 +1126,20 @@ std::optional<ResolvedAddress> AddressResolver::resolve_heap(uint64_t address,
                 rf.is_bitfield = field->is_bitfield;
                 rf.bit_offset_within_field = field->is_bitfield
                     ? (offset * 8 - field->bit_offset) : 0;
+                result.fields.push_back(rf);
+            } else if (elem_size > 0) {
+                uint64_t elem_index = offset / elem_size;
+                ResolvedField rf = {};
+                rf.type_name = type_result.type_name;
+                rf.field_name = "[" + std::to_string(elem_index) + "]";
+                rf.full_path = type_result.type_name + "[" +
+                               std::to_string(elem_index) + "]";
+                rf.field_byte_offset = offset;
+                rf.field_byte_size = elem_size;
+                rf.base_address = alloc->addr;
+                rf.resolved_address = address;
+                rf.field_type_name = type_result.type_name;
+                rf.is_bitfield = false;
                 result.fields.push_back(rf);
             }
         }

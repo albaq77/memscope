@@ -130,6 +130,7 @@ private:
                                                 const std::vector<uint64_t> &inline_pcs = {}) const;
     TypeInferenceResult infer_type_from_source_text(uint64_t pc) const;
     TypeInferenceResult try_array_size_match(uint64_t size) const;
+    TypeInferenceResult try_scalar_array_match(uint64_t size) const;
     std::vector<std::string> get_size_candidates(uint64_t size) const;
 
     std::vector<std::string> resolve_stack_function_names(int64_t stack_id) const;

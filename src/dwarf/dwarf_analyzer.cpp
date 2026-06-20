@@ -454,6 +454,28 @@ void DwarfAnalyzer::process_subprogram_die(void *die_v)
                                     const char *target_name = dwarf_diename(&target_type_die);
                                     if (target_name)
                                         var_info.pointer_target_type_name = target_name;
+
+                                    Dwarf_Die deepest_die = target_type_die;
+                                    for (int depth = 0; depth < 16; depth++) {
+                                        int dtag = dwarf_tag(&deepest_die);
+                                        if (dtag != DW_TAG_pointer_type &&
+                                            dtag != DW_TAG_typedef &&
+                                            dtag != DW_TAG_const_type &&
+                                            dtag != DW_TAG_volatile_type &&
+                                            dtag != DW_TAG_restrict_type)
+                                            break;
+                                        Dwarf_Attribute dta;
+                                        if (!dwarf_attr(&deepest_die, DW_AT_type, &dta))
+                                            break;
+                                        Dwarf_Die next_die;
+                                        if (!dwarf_formref_die(&dta, &next_die))
+                                            break;
+                                        deepest_die = next_die;
+                                    }
+
+                                    const char *deepest_name = dwarf_diename(&deepest_die);
+                                    if (deepest_name && var_info.pointer_target_type_name.empty())
+                                        var_info.pointer_target_type_name = deepest_name;
                                 }
                             }
                         } else if (type_tag == DW_TAG_array_type) {
@@ -472,6 +494,28 @@ void DwarfAnalyzer::process_subprogram_die(void *die_v)
                                                 const char *target_name = dwarf_diename(&target_type_die);
                                                 if (target_name)
                                                     var_info.pointer_target_type_name = target_name;
+
+                                                Dwarf_Die deepest_die = target_type_die;
+                                                for (int depth = 0; depth < 16; depth++) {
+                                                    int dtag = dwarf_tag(&deepest_die);
+                                                    if (dtag != DW_TAG_pointer_type &&
+                                                        dtag != DW_TAG_typedef &&
+                                                        dtag != DW_TAG_const_type &&
+                                                        dtag != DW_TAG_volatile_type &&
+                                                        dtag != DW_TAG_restrict_type)
+                                                        break;
+                                                    Dwarf_Attribute dta;
+                                                    if (!dwarf_attr(&deepest_die, DW_AT_type, &dta))
+                                                        break;
+                                                    Dwarf_Die next_die;
+                                                    if (!dwarf_formref_die(&dta, &next_die))
+                                                        break;
+                                                    deepest_die = next_die;
+                                                }
+
+                                                const char *deepest_name = dwarf_diename(&deepest_die);
+                                                if (deepest_name && var_info.pointer_target_type_name.empty())
+                                                    var_info.pointer_target_type_name = deepest_name;
                                             }
                                         }
                                     }
@@ -531,6 +575,31 @@ void DwarfAnalyzer::process_variable_die(void *die_v)
             if (type_name)
                 sym.type_name = type_name;
             sym.type_die_offset = dwarf_dieoffset(&type_die);
+
+            if (sym.type_name.empty()) {
+                Dwarf_Die deepest_die = type_die;
+                for (int depth = 0; depth < 16; depth++) {
+                    int dtag = dwarf_tag(&deepest_die);
+                    if (dtag != DW_TAG_pointer_type &&
+                        dtag != DW_TAG_typedef &&
+                        dtag != DW_TAG_const_type &&
+                        dtag != DW_TAG_volatile_type &&
+                        dtag != DW_TAG_restrict_type)
+                        break;
+                    Dwarf_Attribute dta;
+                    if (!dwarf_attr(&deepest_die, DW_AT_type, &dta))
+                        break;
+                    Dwarf_Die next_die;
+                    if (!dwarf_formref_die(&dta, &next_die))
+                        break;
+                    deepest_die = next_die;
+                    const char *dn = dwarf_diename(&deepest_die);
+                    if (dn) {
+                        sym.type_name = dn;
+                        break;
+                    }
+                }
+            }
 
             Dwarf_Word type_size = 0;
             if (dwarf_aggregate_size(&type_die, &type_size) == 0 && type_size > 0)
@@ -715,6 +784,38 @@ std::optional<FieldInfo> DwarfAnalyzer::resolve_field_at_offset(
     const TypeInfo *type = find_type_by_name(type_name);
     if (!type)
         return std::nullopt;
+
+    if (type->fields.empty() && type->tag == TypeInfo::TAG_TYPEDEF) {
+        Dwarf_Off off = 0, next_off;
+        size_t cu_hdr_size;
+        Dwarf *dbg = dwarf_ptr_.get();
+        if (dbg) {
+            while (dwarf_nextcu(dbg, off, &next_off, &cu_hdr_size, nullptr, nullptr, nullptr) == 0) {
+                Dwarf_Die cudie;
+                if (dwarf_offdie(dbg, off + cu_hdr_size, &cudie) != nullptr) {
+                    Dwarf_Die tdie;
+                    if (dwarf_offdie(dbg, type->die_offset, &tdie) != nullptr) {
+                        Dwarf_Die cur = tdie;
+                        for (int depth = 0; depth < 16; depth++) {
+                            if (dwarf_tag(&cur) != DW_TAG_typedef)
+                                break;
+                            Dwarf_Attribute ta;
+                            if (!dwarf_attr(&cur, DW_AT_type, &ta))
+                                break;
+                            Dwarf_Die next;
+                            if (!dwarf_formref_die(&ta, &next))
+                                break;
+                            cur = next;
+                        }
+                        const TypeInfo *resolved = find_type_by_offset(dwarf_dieoffset(&cur));
+                        if (resolved && !resolved->fields.empty())
+                            return resolve_field_at_offset(resolved->die_offset, byte_offset);
+                    }
+                }
+                off = next_off;
+            }
+        }
+    }
     return resolve_field_at_offset(type->die_offset, byte_offset);
 }
 
